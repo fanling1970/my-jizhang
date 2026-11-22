@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>my-jizhang · 家庭记账本</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">¥</span>
+        <span class="brand-name">my-jizhang</span>
+      </div>
+      <div class="tab-strip" id="tab-strip"></div>
+      <div class="topbar-right">
+        <span class="save-status" id="save-status"></span>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <span class="sidebar-title">文档</span>
+          <div class="sidebar-actions">
+            <button class="icon-btn" id="btn-new-folder" title="新建目录">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2.5h4l1.5 2H14v9H2v-9h3.5z"/><path d="M8 6.5v5M5.5 9h5"/></svg>
+            </button>
+            <button class="icon-btn" id="btn-new-doc" title="新建文档">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 1.8h4.4l3 3v9.4H4z"/><path d="M8.2 1.9v3.1h3.1"/><path d="M8 8v3.6M6.2 9.8h3.6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="tree" id="tree"></div>
+      </aside>
+
+      <main class="editor is-empty" id="editor">
+        <div class="format-bar" id="format-bar">
+          <div class="fb-group">
+            <button class="fmt-btn" data-cmd="undo" title="撤销">↶</button>
+            <button class="fmt-btn" data-cmd="redo" title="重做">↷</button>
+          </div>
+          <div class="fb-divider"></div>
+          <select class="font-size" id="font-size" title="字号">
+            <option value="">字号</option>
+            <option value="12">12</option>
+            <option value="14">14</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="20">20</option>
+            <option value="24">24</option>
+            <option value="28">28</option>
+            <option value="32">32</option>
+          </select>
+          <button class="fmt-btn bold" data-cmd="bold" title="加粗">B</button>
+          <button class="fmt-btn italic" data-cmd="italic" title="倾斜">I</button>
+          <button class="fmt-btn underline" data-cmd="underline" title="下划线">U</button>
+          <div class="fb-divider"></div>
+          <button class="fmt-btn wide" id="btn-image">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 10.5l3-3 2.5 2.5 3-3 3.5 3.5"/><circle cx="5.5" cy="6" r="1"/></svg>
+            插入图片
+          </button>
+          <button class="fmt-btn wide" id="btn-net-image">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2.4 2 9.6 0 12M8 2c-2 2.4-2 9.6 0 12"/></svg>
+            网络图片
+          </button>
+          <div class="fb-divider"></div>
+          <button class="fmt-btn wide income" id="btn-income">＋ 收入</button>
+          <button class="fmt-btn wide expense" id="btn-expense">－ 支出</button>
+          <button class="fmt-btn wide total" id="btn-total">自动合计</button>
+        </div>
+
+        <div class="doc-scroll" id="doc-scroll">
+          <div class="doc-inner" id="doc-inner">
+            <h1 class="doc-title" id="doc-title" contenteditable="true" spellcheck="false"></h1>
+            <div class="doc-body" id="doc-body" contenteditable="true" spellcheck="false" data-placeholder="点击工具栏的「收入 / 支出」开始记录…"></div>
+          </div>
+        </div>
+
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon">¥</div>
+          <p>从左侧目录里选择一个文档开始记账</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept="image/*" hidden>
+
+  <div class="ctx-menu" id="ctx-menu"></div>
+
+  <div class="img-bar" id="img-bar">
+    <button data-act="rotl" title="向左旋转 90°">↺</button>
+    <button data-act="rotr" title="向右旋转 90°">↻</button>
+    <span class="img-sep"></span>
+    <button data-act="zoomout" title="按比例缩小">－</button>
+    <span class="img-size" id="img-size">0 × 0</span>
+    <button data-act="zoomin" title="按比例放大">＋</button>
+    <span class="img-sep"></span>
+    <button data-act="reset" title="恢复原始尺寸">原始</button>
+    <button data-act="fit" title="按宽度适应页面">适应宽度</button>
+    <span class="img-sep"></span>
+    <button data-act="del" class="danger" title="删除图片">删除</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

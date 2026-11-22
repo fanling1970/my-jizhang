@@ -1,0 +1,11 @@
+services:
+  my-jizhang:
+    image: ghcr.io/fanling1970/my-jizhang:latest
+    container_name: my-jizhang
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Asia/Shanghai
