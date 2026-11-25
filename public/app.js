@@ -34,6 +34,13 @@
     imgHeightPx: $('#img-height-px'),
     imgHeightPct: $('#img-height-pct'),
     imgHeightPctLabel: $('#img-height-pct-label'),
+    btnSettings: $('#btn-settings'),
+    btnLogout: $('#btn-logout'),
+    settingsModal: $('#settings-modal'),
+    importInput: $('#import-input'),
+    pwMsg: $('#pw-msg'),
+    backupList: $('#backup-list'),
+    auditLog: $('#audit-log'),
   };
 
   const ICON = {
@@ -65,6 +72,7 @@
   };
 
   let lastRange = null;
+  let lastTableInput = null; // 最后聚焦的表格原生输入框（.lg-desc/.lg-amount/.lg-date）
   let ctxTargetId = null;
   let imgCtxTarget = null;
   let ctxMenuOpen = null; // 'ctx' | 'sidebar' | null
@@ -87,6 +95,10 @@
       opts.body = JSON.stringify(opts.body);
     }
     const res = await fetch(path, opts);
+    if (res.status === 401) {
+      if (location.pathname !== '/login.html') location.href = '/login.html';
+      throw new Error('未登录');
+    }
     const data = await res.json().catch(() => null);
     if (!res.ok) {
       const err = new Error((data && data.error) || `HTTP ${res.status}`);
@@ -174,6 +186,7 @@
     hideImgCtxMenu();
     renderBreadcrumb(doc);
     normalizeImgs();
+    normalizeLedgers();
     recalcTotals();
     el.docScroll.scrollTop = 0;
     resetHistory();
@@ -341,7 +354,8 @@
     hideImgCtxMenu();
     const inner = `
       <button data-act="new-root" id="btn-new-doc-2">新建笔记本</button>
-      <button data-act="import" disabled>导入笔记本 <span class="shortcut">—</span></button>
+      <button data-act="import">导入笔记本…</button>
+      <button data-act="export-all">导出全部数据</button>
       <button data-act="reindex" disabled>重建索引 <span class="shortcut">—</span></button>
       <div class="ctx-divider"></div>
       <button data-act="foldall">全部折叠</button>
@@ -369,7 +383,7 @@
       <button data-act="child-doc-above">在上方新建文档</button>
       <div class="ctx-divider"></div>
       <button data-act="move">移动 <span class="sub-arrow">›</span></button>
-      <button data-act="export" disabled>导出 <span class="sub-arrow">›</span></button>
+      <button data-act="export">导出（含子级）</button>
       <div class="ctx-divider"></div>
       <button data-act="delete" class="danger">删除</button>
     `;
@@ -391,7 +405,7 @@
       <div class="ctx-divider"></div>
       <button data-act="open-right">在页签右侧打开 <span class="shortcut">Alt+点击</span></button>
       <button data-act="move">移动 <span class="sub-arrow">›</span></button>
-      <button data-act="export" disabled>导出 <span class="sub-arrow">›</span></button>
+      <button data-act="export">导出</button>
       <div class="ctx-divider"></div>
       <button data-act="delete" class="danger">删除</button>
     `;
@@ -592,7 +606,37 @@
     return null;
   }
 
+  /** 是否为表格里的原生输入框（window.getSelection 取不到它们的光标） */
+  function isTableInput(el) {
+    return !!(el && el.matches && el.matches('.lg-desc, .lg-amount, .lg-date'));
+  }
+
+  /**
+   * 统一取当前光标上下文：优先原生表格输入框，其次 contenteditable 选区。
+   * 返回 {kind:'range', range, node} | {kind:'input', input} | null
+   */
+  function getActiveContext() {
+    // 原生输入框优先：聚焦 input 时 window.getSelection 会残留一个不相关的 range
+    const active = document.activeElement;
+    if (isTableInput(active) && el.docBody.contains(active)) return { kind: 'input', input: active };
+    if (lastTableInput && el.docBody.contains(lastTableInput)) return { kind: 'input', input: lastTableInput };
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && sel.anchorNode && el.docBody.contains(sel.anchorNode)) {
+      let n = sel.getRangeAt(0).startContainer;
+      if (n && n.nodeType !== 1) n = n.parentElement;
+      if (n && el.docBody.contains(n)) return { kind: 'range', range: sel.getRangeAt(0), node: n };
+    }
+    if (lastRange && el.docBody.contains(lastRange.startContainer)) {
+      let n = lastRange.startContainer;
+      if (n.nodeType !== 1) n = n.parentElement;
+      return { kind: 'range', range: lastRange, node: n };
+    }
+    return null;
+  }
+
   function restoreSelection() {
+    // 原生 input 的选区由浏览器自己保持，不要用 docBody.focus() 抢走焦点
+    if (getActiveContext() && getActiveContext().kind === 'input') return;
     const range = getActiveRange();
     if (range) {
       const sel = window.getSelection();
@@ -623,7 +667,7 @@
     if (range) {
       let n = range.startContainer;
       if (n.nodeType !== 1) n = n.parentElement;
-      const cand = n && n.closest ? n.closest('p, li, blockquote, h1, h2, h3, h4, pre') : null;
+      const cand = n && n.closest ? n.closest('p, li, blockquote, h1, h2, h3, h4, pre, .voucher-cell') : null;
       if (cand && el.docBody.contains(cand)) block = cand;
     }
 
@@ -633,6 +677,17 @@
       const blank = document.createElement('p');
       node.after(blank);
       placeCaret(blank, 0);
+      return;
+    }
+
+    /* 光标在凭证行里：把块直接插进凭证单元格（不拆行） */
+    if (block.classList.contains('voucher-cell')) {
+      try {
+        range.insertNode(node);
+        const parent = node.parentNode;
+        const idx = Array.from(parent.childNodes).indexOf(node);
+        placeCaret(parent, idx + 1);
+      } catch { block.appendChild(node); }
       return;
     }
 
@@ -701,25 +756,76 @@
     wrap.className = 'ledger';
     wrap.contentEditable = 'false';
     wrap.innerHTML =
+      '<div class="ledger-resize" title="拖动调整表格宽度（仅内容列变化）"></div>' +
       '<table class="ledger-table">' +
+      '<colgroup>' +
+      '<col class="col-date" style="width:120px">' +
+      '<col class="col-type" style="width:84px">' +
+      '<col class="col-desc">' +
+      '<col class="col-amount" style="width:116px">' +
+      '<col class="col-op" style="width:32px">' +
+      '</colgroup>' +
       '<thead><tr>' +
       '<th class="c-date">日期</th><th class="c-type">类型</th><th class="c-desc">内容</th>' +
       '<th class="c-amount">金额</th><th class="c-op"></th>' +
       '</tr></thead><tbody></tbody>' +
       '<tfoot><tr class="ledger-foot">' +
-      '<td colspan="3" class="lg-label">合计</td>' +
-      '<td colspan="2" class="lg-sum">' +
+      '<td colspan="5"><div class="lg-foot-inner">' +
+      '<span class="lg-label">合计</span>' +
+      '<span class="lg-sum">' +
       '<span class="lg-income">收入 ¥0.00</span>' +
       '<span class="lg-expense">支出 ¥0.00</span>' +
       '<span class="lg-balance">结余 ¥0.00</span>' +
-      '</td></tr></tfoot></table>' +
+      '</span></div></td>' +
+      '</tr></tfoot></table>' +
       '<div class="ledger-bar">' +
       '<button class="lg-add" data-type="income" type="button">＋ 收入</button>' +
       '<button class="lg-add" data-type="expense" type="button">－ 支出</button>' +
+      '<button class="lg-add" data-act="voucher" type="button">＋ 凭证</button>' +
       '</div>';
     wrap.querySelector('tbody').appendChild(createLedgerRow(type));
     return wrap;
   }
+
+  /** 把旧版表格（无 colgroup / 旧合计行 / 无凭证按钮）统一升级，保证渲染一致 */
+  function normalizeLedger(ledger) {
+    if (!ledger) return;
+    const tbl = ledger.querySelector('.ledger-table');
+    if (tbl && !ledger.querySelector('colgroup')) {
+      const cg = document.createElement('colgroup');
+      cg.innerHTML =
+        '<col class="col-date" style="width:120px">' +
+        '<col class="col-type" style="width:84px">' +
+        '<col class="col-desc">' +
+        '<col class="col-amount" style="width:116px">' +
+        '<col class="col-op" style="width:32px">';
+      tbl.insertBefore(cg, tbl.firstChild);
+    }
+    if (!ledger.querySelector('.ledger-resize')) {
+      const h = document.createElement('div');
+      h.className = 'ledger-resize';
+      h.title = '拖动调整表格宽度（仅内容列变化）';
+      ledger.insertBefore(h, ledger.firstChild);
+    }
+    const foot = ledger.querySelector('.ledger-foot');
+    if (foot && !foot.querySelector('.lg-foot-inner')) {
+      foot.innerHTML =
+        '<td colspan="5"><div class="lg-foot-inner">' +
+        '<span class="lg-label">合计</span>' +
+        '<span class="lg-sum">' +
+        '<span class="lg-income">收入 ¥0.00</span>' +
+        '<span class="lg-expense">支出 ¥0.00</span>' +
+        '<span class="lg-balance">结余 ¥0.00</span>' +
+        '</span></div></td>';
+    }
+    const bar = ledger.querySelector('.ledger-bar');
+    if (bar && !bar.querySelector('[data-act="voucher"]')) {
+      const b = document.createElement('button');
+      b.className = 'lg-add'; b.dataset.act = 'voucher'; b.type = 'button'; b.textContent = '＋ 凭证';
+      bar.appendChild(b);
+    }
+  }
+  function normalizeLedgers() { $$('.ledger', el.docBody).forEach(normalizeLedger); }
 
   function findLedgerAtCaret() {
     const range = getActiveRange();
@@ -727,6 +833,46 @@
     let n = range.startContainer;
     if (n.nodeType !== 1) n = n.parentElement;
     return n && n.closest ? n.closest('.ledger') : null;
+  }
+
+  /** 光标所在表格 + 当前组归属的数据行（凭证行归属到上方最近的数据行） */
+  function findLedgerContext() {
+    const ctx = getActiveContext();
+    if (!ctx) return null;
+    const n = ctx.kind === 'range' ? ctx.node : ctx.input;
+    const ledger = n && n.closest ? n.closest('.ledger') : null;
+    if (!ledger) return null;
+    const row = n.closest ? n.closest('.ledger-row, .voucher-row') : null;
+    let owner = null;
+    if (row) {
+      if (row.classList.contains('ledger-row')) owner = row;
+      else {
+        let prev = row.previousElementSibling;
+        while (prev && !prev.classList.contains('ledger-row')) prev = prev.previousElementSibling;
+        owner = prev || null;
+      }
+    }
+    return { ledger, ownerRow: owner };
+  }
+
+  /** 当前数据行所在组的最后一行（其后插入新行） */
+  function groupEndRow(ownerRow) {
+    if (!ownerRow) return null;
+    let end = ownerRow;
+    let next = ownerRow.nextElementSibling;
+    while (next && next.classList.contains('voucher-row')) { end = next; next = next.nextElementSibling; }
+    return end;
+  }
+
+  function createVoucherRow() {
+    const tr = document.createElement('tr');
+    tr.className = 'voucher-row';
+    tr.innerHTML =
+      '<td colspan="5"><div class="voucher-wrap">' +
+      '<button class="voucher-del" type="button" contenteditable="false" title="删除该凭证行">✕</button>' +
+      '<div class="voucher-cell" contenteditable="true" data-placeholder="在此输入备注，或点工具栏「插入图片」上传凭证…"></div>' +
+      '</div></td>';
+    return tr;
   }
 
   function appendLedgerRow(ledger, type) {
@@ -739,12 +885,58 @@
     return row;
   }
 
+  /** 在指定表格里插数据行：光标在某组 → 插到该组末尾；否则追加到表尾 */
+  function insertLedgerRowInLedger(ledger, type) {
+    restoreSelection();
+    const ctx = findLedgerContext();
+    if (ctx && ctx.ledger === ledger && ctx.ownerRow) {
+      const end = groupEndRow(ctx.ownerRow);
+      const row = createLedgerRow(type);
+      end.after(row);
+      recalcTotals(); markDirty(); commitHistory(true);
+      const desc = row.querySelector('.lg-desc');
+      if (desc) desc.focus();
+      row.scrollIntoView({ block: 'nearest' });
+      return row;
+    }
+    return appendLedgerRow(ledger, type);
+  }
+
+  /** 插入凭证行：必须光标在「内容」输入框内，否则无效 */
+  function insertVoucher() {
+    if (!state.activeId) return;
+    const ctx = getActiveContext();
+    let desc = null;
+    if (ctx) {
+      if (ctx.kind === 'input' && ctx.input.matches('.lg-desc')) desc = ctx.input;
+      else if (ctx.kind === 'range') {
+        let n = ctx.range.startContainer;
+        if (n && n.nodeType !== 1) n = n.parentElement;
+        desc = n && n.closest ? n.closest('.lg-desc') : null;
+      }
+    }
+    if (!desc) { setStatus('请先把光标放到某行的「内容」输入框里'); return; }
+    const ledger = desc.closest('.ledger');
+    const ownerRow = desc.closest('.ledger-row');
+    if (!ledger || !ownerRow) { setStatus('请先把光标放到表格的内容输入框里'); return; }
+    const end = groupEndRow(ownerRow);
+    const v = createVoucherRow();
+    end.after(v);
+    recalcTotals(); markDirty(); commitHistory(true);
+    desc.focus(); // 还焦点给来源内容框（浏览器恢复其选区）
+    v.scrollIntoView({ block: 'nearest' });
+  }
+
   function insertMoney(type) {
     if (!state.activeId) return;
     restoreSelection();
-    /* 只有光标在表格内部时才往那张表加行；否则在光标行新建一张表 */
-    const target = findLedgerAtCaret();
-    if (target) { appendLedgerRow(target, type); return; }
+    /* 光标在某张表里 → 按位置插到当前组末尾；否则在光标行新建一张表 */
+    const ctx = findLedgerContext();
+    if (ctx) {
+      if (ctx.ownerRow) insertLedgerRowInLedger(ctx.ledger, type);
+      else appendLedgerRow(ctx.ledger, type);
+      return;
+    }
     const ledger = createLedger(type);
     insertBlockAtCaret(ledger);
     recalcTotals(); markDirty(); commitHistory(true);
@@ -1077,6 +1269,166 @@
     } catch { /* ignore */ }
   }
 
+  /* ---------------- 设置 / 备份 / 导入导出 / 表格调宽 ---------------- */
+
+  function openSettings() {
+    el.settingsModal.hidden = false;
+    loadBackupList();
+    loadAuditLog();
+  }
+  function closeSettings() { el.settingsModal.hidden = true; }
+
+  async function changePassword() {
+    const old = $('#set-old').value, n = $('#set-new').value, n2 = $('#set-new2').value;
+    el.pwMsg.className = 'set-msg';
+    el.pwMsg.textContent = '';
+    if (!old || !n) { el.pwMsg.textContent = '请填写完整'; el.pwMsg.classList.add('err'); return; }
+    if (n.length < 6) { el.pwMsg.textContent = '新密码至少 6 位'; el.pwMsg.classList.add('err'); return; }
+    if (n !== n2) { el.pwMsg.textContent = '两次输入的新密码不一致'; el.pwMsg.classList.add('err'); return; }
+    try {
+      await api('/api/change-password', { method: 'POST', body: { old, new: n } });
+      el.pwMsg.textContent = '密码已修改';
+      el.pwMsg.classList.add('ok');
+      $('#set-old').value = ''; $('#set-new').value = ''; $('#set-new2').value = '';
+    } catch (e) { el.pwMsg.textContent = e.message || '修改失败'; el.pwMsg.classList.add('err'); }
+  }
+
+  async function loadBackupList() {
+    try {
+      const r = await api('/api/backups');
+      const items = r.items || [];
+      if (!items.length) { el.backupList.innerHTML = '<div class="set-empty">暂无备份</div>'; return; }
+      el.backupList.innerHTML = items.map((it) => {
+        const t = new Date(it.mtime);
+        const sz = (it.size / 1024).toFixed(1) + ' KB';
+        return (
+          `<div class="set-item">` +
+          `<span class="set-item-name">${escapeHtml(it.name)}</span>` +
+          `<span class="set-item-meta">${t.toLocaleString()} · ${sz}</span>` +
+          `<span class="set-item-acts">` +
+          `<button data-restore="${escapeAttr(it.name)}">恢复</button>` +
+          `<button data-del-bk="${escapeAttr(it.name)}" class="danger">删除</button>` +
+          `</span></div>`
+        );
+      }).join('');
+    } catch (e) { el.backupList.textContent = '加载失败：' + e.message; }
+  }
+
+  async function loadAuditLog() {
+    try {
+      const r = await api('/api/audit?limit=200');
+      const items = r.items || [];
+      if (!items.length) { el.auditLog.innerHTML = '<div class="set-empty">暂无日志</div>'; return; }
+      el.auditLog.innerHTML = items.map((it) => {
+        const t = new Date(it.ts);
+        const detail = {};
+        Object.keys(it).forEach((k) => { if (!['ts', 'ip', 'event'].includes(k)) detail[k] = it[k]; });
+        const dstr = Object.keys(detail).length ? escapeHtml(JSON.stringify(detail)) : '';
+        return (
+          `<div class="log-line">` +
+          `<span class="log-ts">${t.toLocaleString()}</span>` +
+          `<span class="log-ip">${escapeHtml(it.ip || '')}</span>` +
+          `<span class="log-ev">${escapeHtml(it.event)}</span>` +
+          `<span class="log-detail">${dstr}</span>` +
+          `</div>`
+        );
+      }).join('');
+    } catch (e) { el.auditLog.textContent = '加载失败：' + e.message; }
+  }
+
+  /** 导出：id 为空导出全部，否则导出该节点子树 */
+  function exportNode(id) {
+    location.href = '/api/export' + (id ? '?id=' + encodeURIComponent(id) : '');
+  }
+
+  async function doImport(file) {
+    setStatus('导入中…');
+    let text;
+    try { text = await file.text(); } catch { setStatus('读取文件失败'); return; }
+    let data;
+    try { data = JSON.parse(text); } catch { setStatus('导入失败：不是有效的 JSON 文件'); return; }
+    if (!data || !Array.isArray(data.docs)) { setStatus('导入失败：文件格式不正确'); return; }
+    const src = data.docs.filter((d) => d && d.id && d.name);
+    const srcIds = new Set(src.map((d) => d.id));
+    const rootFolder = state.docs.find((d) => !d.parent_id && d.kind === 'folder');
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    let importRoot;
+    try {
+      const created = await api('/api/docs', {
+        method: 'POST',
+        body: { name: `导入-${stamp}`, kind: 'folder', parent_id: rootFolder ? rootFolder.id : null },
+      });
+      importRoot = created.id;
+    } catch (e) { setStatus('创建导入目录失败：' + e.message); return; }
+    const map = {};
+    const depthOf = (id, seen) => {
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      const d = src.find((x) => x.id === id);
+      if (!d || !d.parent_id || !srcIds.has(d.parent_id)) return 0;
+      return depthOf(d.parent_id, seen) + 1;
+    };
+    const ordered = src.slice().sort((a, b) => depthOf(a.id, new Set()) - depthOf(b.id, new Set()));
+    let okCount = 0;
+    for (const d of ordered) {
+      const newParent = (d.parent_id && map[d.parent_id]) ? map[d.parent_id] : importRoot;
+      try {
+        const r = await api('/api/docs', {
+          method: 'POST',
+          body: {
+            name: d.name,
+            kind: d.kind === 'folder' ? 'folder' : 'doc',
+            content: typeof d.content === 'string' ? d.content : '',
+            parent_id: newParent,
+          },
+        });
+        map[d.id] = r.id;
+        okCount += 1;
+      } catch { /* 跳过失败项 */ }
+    }
+    await loadDocs();
+    renderTree();
+    setStatus(`导入完成：共 ${okCount} 项`);
+  }
+
+  /** 表格右边缘拖拽调宽：只改 .ledger 宽度，内容列自动吸收，固定列不变 */
+  function bindTableResize() {
+    let dragging = null;
+    const MIN = 412; // 固定列 120+84+116+32 + 内容列最小 60
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - dragging.startX;
+      const max = el.docBody.clientWidth || 720;
+      const w = Math.max(MIN, Math.min(max, Math.round(dragging.startWidth + dx)));
+      dragging.ledger.style.width = w + 'px';
+    };
+    const onUp = () => {
+      if (dragging) { markDirty(); commitHistory(true); dragging = null; }
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    el.docBody.addEventListener('mousedown', (e) => {
+      const handle = e.target.closest ? e.target.closest('.ledger-resize') : null;
+      if (!handle) return;
+      const ledger = handle.closest('.ledger');
+      if (!ledger) return;
+      e.preventDefault();
+      dragging = { ledger, startX: e.clientX, startWidth: ledger.getBoundingClientRect().width };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    });
+    el.docBody.addEventListener('dblclick', (e) => {
+      const handle = e.target.closest ? e.target.closest('.ledger-resize') : null;
+      if (!handle) return;
+      const ledger = handle.closest('.ledger');
+      if (ledger) { ledger.style.width = ''; markDirty(); commitHistory(true); }
+    });
+  }
+
   /* ---------------- 事件绑定 ---------------- */
 
   function bindEvents() {
@@ -1086,6 +1438,13 @@
         lastRange = sel.getRangeAt(0).cloneRange();
       }
       updateFormatState();
+    });
+
+    // 记录最后聚焦的表格原生输入框（用于凭证行 / 按组插入的光标判定）。
+    // 切回正文编辑区（contenteditable）时才清除；点按钮等非编辑控件时保留。
+    el.docBody.addEventListener('focusin', (e) => {
+      if (isTableInput(e.target)) lastTableInput = e.target;
+      else if (e.target && e.target.isContentEditable) lastTableInput = null;
     });
 
     /* 侧边栏头部按钮 */
@@ -1151,6 +1510,8 @@
           await createDoc(root ? root.id : null, 'folder');
         } else if (act === 'foldall') collapseAll();
         else if (act === 'unfoldall') expandAll();
+        else if (act === 'import') { el.importInput.click(); }
+        else if (act === 'export-all') { exportNode(null); }
         else if (act === 'sort') { window.prompt('排序子菜单暂未实现，后续补充', document.body.innerText); renderTree(); }
         return;
       }
@@ -1186,6 +1547,8 @@
             await moveDoc(doc, target);
           }
         }
+      } else if (act === 'export') {
+        exportNode(doc.id);
       }
     });
 
@@ -1264,11 +1627,21 @@
         return;
       }
 
-      /* 收支表格：加一行 / 删一行 */
+      /* 收支表格：加一行 / 删一行 / 加凭证 */
       const addBtn = event.target.closest ? event.target.closest('.lg-add') : null;
       if (addBtn) {
         const ledger = addBtn.closest('.ledger');
-        if (ledger) appendLedgerRow(ledger, addBtn.dataset.type || 'expense');
+        if (ledger) {
+          if (addBtn.dataset.act === 'voucher') insertVoucher();
+          else insertLedgerRowInLedger(ledger, addBtn.dataset.type || 'expense');
+        }
+        return;
+      }
+      const voucherDel = event.target.closest ? event.target.closest('.voucher-del') : null;
+      if (voucherDel) {
+        const vrow = voucherDel.closest('.voucher-row');
+        if (vrow) vrow.remove();
+        recalcTotals(); markDirty(); commitHistory(true);
         return;
       }
       const rowDel = event.target.closest ? event.target.closest('.lg-del') : null;
@@ -1384,6 +1757,47 @@
     $('#btn-income').addEventListener('click', () => insertMoney('income'));
     $('#btn-expense').addEventListener('click', () => insertMoney('expense'));
     $('#btn-total').addEventListener('click', () => insertTotal());
+
+    /* 设置 / 备份 / 导入导出 / 登出 */
+    el.btnSettings.addEventListener('click', () => openSettings());
+    el.btnLogout.addEventListener('click', async () => {
+      try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+      location.href = '/login.html';
+    });
+    el.settingsModal.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('[data-close]')) closeSettings();
+    });
+    $('#btn-change-pw').addEventListener('click', changePassword);
+    $('#btn-backup-now').addEventListener('click', async () => {
+      try { await api('/api/backup', { method: 'POST' }); await loadBackupList(); setStatus('备份已创建'); }
+      catch (e) { setStatus('备份失败：' + e.message); }
+    });
+    $('#btn-export-all').addEventListener('click', () => exportNode(null));
+    $('#btn-import-file').addEventListener('click', () => el.importInput.click());
+    el.importInput.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) doImport(f);
+      e.target.value = '';
+    });
+    el.backupList.addEventListener('click', async (e) => {
+      const restore = e.target.closest ? e.target.closest('[data-restore]') : null;
+      const del = e.target.closest ? e.target.closest('[data-del-bk]') : null;
+      if (restore) {
+        if (!confirm(`确定从备份「${restore.dataset.restore}」恢复？当前数据将被覆盖。`)) return;
+        try {
+          await api(`/api/backups/${encodeURIComponent(restore.dataset.restore)}/restore`, { method: 'POST' });
+          setStatus('已恢复备份');
+          if (state.activeId) renderDoc(state.activeId);
+          loadBackupList();
+        } catch (err) { setStatus('恢复失败：' + err.message); }
+      } else if (del) {
+        if (!confirm(`确定删除备份「${del.dataset.delBk}」？`)) return;
+        try { await api(`/api/backups/${encodeURIComponent(del.dataset.delBk)}`, { method: 'DELETE' }); loadBackupList(); }
+        catch (err) { setStatus('删除失败：' + err.message); }
+      }
+    });
+
+    bindTableResize();
 
     /* 图片菜单（由图片右上角三点触发） */
     el.imgCtxMenu.addEventListener('click', (event) => {
@@ -1579,6 +1993,11 @@
   /* ---------------- 启动 ---------------- */
 
   async function init() {
+    /* 会话校验：未登录直接跳登录页 */
+    try {
+      const st = await api('/api/auth/status');
+      if (!st.authenticated) { location.href = '/login.html'; return; }
+    } catch { location.href = '/login.html'; return; }
     bindEvents();
     try { await loadDocs(); }
     catch { el.tree.innerHTML = '<div class="tree-empty">加载失败，请刷新重试</div>'; return; }

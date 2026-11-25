@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>my-jizhang · 家庭记账本</title>
-  <link rel="stylesheet" href="styles.css?v=20261125a">
+  <link rel="stylesheet" href="styles.css?v=20261125b">
 </head>
 <body>
   <div class="app">
@@ -15,6 +15,12 @@
       </div>
       <div class="tab-strip" id="tab-strip"></div>
       <div class="topbar-right">
+        <button class="icon-btn" id="btn-settings" title="设置 / 改密 / 备份 / 日志">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5l.8 1.9 2-.5.5 2 1.9.8-.5 2 .5 2-1.9.8-.5 2-2-.5L8 14.5l-.8-1.9-2 .5-.5-2L2.8 10.3l.5-2-.5-2 1.9-.8.5-2 2 .5z"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-logout" title="退出登录">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 2H3v12h3"/><path d="M10.5 8H6m0 0l2.5-2.5M6 8l2.5 2.5"/></svg>
+        </button>
         <span class="save-status" id="save-status"></span>
       </div>
     </header>
@@ -100,6 +106,43 @@
   </div>
 
   <input type="file" id="file-input" accept="image/*" hidden>
+  <input type="file" id="import-input" accept=".json,application/json" hidden>
+
+  <!-- 设置面板：修改密码 / 备份 / 审计日志 / 导入导出 -->
+  <div class="modal" id="settings-modal" hidden>
+    <div class="modal-mask" data-close></div>
+    <div class="modal-panel">
+      <div class="modal-head">
+        <span>设置</span>
+        <button class="modal-close" data-close>×</button>
+      </div>
+      <div class="modal-body">
+        <section class="set-section">
+          <h3>修改密码</h3>
+          <div class="set-row"><label>旧密码</label><input type="password" id="set-old" placeholder="当前密码"></div>
+          <div class="set-row"><label>新密码</label><input type="password" id="set-new" placeholder="至少 6 位"></div>
+          <div class="set-row"><label>确认新密码</label><input type="password" id="set-new2" placeholder="再次输入"></div>
+          <button class="set-btn primary" id="btn-change-pw">保存新密码</button>
+          <div class="set-msg" id="pw-msg"></div>
+        </section>
+
+        <section class="set-section">
+          <h3>备份</h3>
+          <div class="set-row-actions">
+            <button class="set-btn" id="btn-backup-now">立即备份</button>
+            <button class="set-btn" id="btn-export-all">导出全部数据</button>
+            <button class="set-btn" id="btn-import-file">导入数据…</button>
+          </div>
+          <div class="set-list" id="backup-list"></div>
+        </section>
+
+        <section class="set-section">
+          <h3>审计日志（最近 200 条）</h3>
+          <div class="set-log" id="audit-log"></div>
+        </section>
+      </div>
+    </div>
+  </div>
 
   <!-- 通用右键菜单（目录树节点等） -->
   <div class="ctx-menu" id="ctx-menu"></div>
@@ -189,6 +232,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261125g"></script>
+  <script src="app.js?v=20261125j"></script>
 </body>
 </html>

@@ -266,6 +266,7 @@ button { cursor: pointer; }
 
 /* ---------- 收支表格（思源数据库风格） ---------- */
 .ledger {
+  position: relative;
   margin: 10px 0 16px;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -339,15 +340,16 @@ button { cursor: pointer; }
   border-bottom: 0 !important;
   font-size: 12.5px;
 }
-.lg-label { padding: 0 8px !important; font-weight: 600; color: var(--text-soft); }
-.lg-sum {
-  padding: 6px 10px !important;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+/* 合计行：跨整行 flex 布局，左「合计」右金额，永不截断 */
+.lg-foot-inner {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 10px; gap: 8px;
 }
-.lg-sum span { margin-left: 16px; font-weight: 600; }
-.lg-sum span:first-child { margin-left: 0; }
+.lg-label { font-weight: 600; color: var(--text-soft); white-space: nowrap; }
+.lg-sum {
+  display: inline-flex; gap: 16px; align-items: center;
+  white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600;
+}
 .lg-income { color: var(--income); }
 .lg-expense { color: var(--expense); }
 .lg-balance { color: var(--primary); }
@@ -502,6 +504,104 @@ button { cursor: pointer; }
   background: var(--bg); font-size: 12.5px; outline: none;
 }
 .img-ctx-field input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
+
+/* ---------- 表格拖拽调宽手柄（右边缘） ---------- */
+.ledger-resize {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: 6px; cursor: ew-resize; z-index: 3;
+  background: transparent;
+}
+.ledger-resize:hover { background: var(--primary); opacity: .35; }
+.ledger-resize:active { background: var(--primary); opacity: .55; }
+@media (hover: none) {
+  .ledger-resize { width: 10px; background: rgba(63, 108, 255, 0.08); }
+}
+
+/* ---------- 凭证行 ---------- */
+.voucher-row td {
+  background: #fbfcfe; height: auto; padding: 0; vertical-align: top;
+  border-bottom: 1px dashed var(--border);
+}
+.voucher-wrap { position: relative; padding: 6px 8px 6px 28px; min-height: 40px; }
+.voucher-cell {
+  min-height: 28px; outline: none;
+  font-size: 13px; line-height: 1.5; color: var(--text);
+}
+.voucher-cell:empty::before {
+  content: attr(data-placeholder); color: #b9bec6; pointer-events: none;
+}
+.voucher-cell .img-line { margin: 4px 0; }
+.voucher-del {
+  position: absolute; top: 4px; left: 6px;
+  width: 18px; height: 18px; padding: 0; line-height: 1;
+  border: 0; border-radius: 3px; background: transparent;
+  color: #b9bec6; font-size: 12px; cursor: pointer;
+}
+.voucher-del:hover { background: var(--expense-bg); color: var(--expense); }
+
+/* ---------- 设置面板模态框 ---------- */
+.modal { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; }
+.modal[hidden] { display: none; }
+.modal-mask { position: absolute; inset: 0; background: rgba(30, 40, 60, .35); }
+.modal-panel {
+  position: relative; width: 540px; max-width: calc(100vw - 32px); max-height: 88vh;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(40, 60, 90, .18); display: flex; flex-direction: column;
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 14px;
+}
+.modal-close { border: 0; background: transparent; font-size: 20px; color: var(--muted); cursor: pointer; line-height: 1; }
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 12px 16px 16px; overflow: auto; }
+.set-section { padding: 10px 0; border-bottom: 1px dashed var(--border); }
+.set-section:last-child { border-bottom: 0; }
+.set-section h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text-soft); }
+.set-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.set-row label { width: 80px; font-size: 12.5px; color: var(--muted); }
+.set-row input {
+  flex: 1; height: 32px; padding: 0 10px; border: 1px solid var(--border);
+  border-radius: 5px; font-size: 13px; outline: none; background: var(--bg);
+}
+.set-row input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.set-row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.set-btn {
+  height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); font-size: 12.5px; cursor: pointer; color: var(--text);
+}
+.set-btn:hover { background: var(--hover); }
+.set-btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.set-btn.primary:hover { opacity: .9; }
+.set-btn.danger { color: var(--expense); }
+.set-msg { min-height: 16px; font-size: 12px; margin-top: 6px; }
+.set-msg.err { color: var(--expense); }
+.set-msg.ok { color: var(--income); }
+.set-list { border: 1px solid var(--border); border-radius: 5px; max-height: 180px; overflow: auto; }
+.set-empty { padding: 10px; text-align: center; color: var(--muted); font-size: 12px; }
+.set-item {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.set-item:last-child { border-bottom: 0; }
+.set-item-name { flex: 1; font-family: ui-monospace, monospace; }
+.set-item-meta { color: var(--muted); white-space: nowrap; }
+.set-item-acts button {
+  height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); font-size: 11.5px; cursor: pointer; margin-left: 4px;
+}
+.set-item-acts button.danger { color: var(--expense); }
+.set-log { border: 1px solid var(--border); border-radius: 5px; max-height: 260px; overflow: auto; font-size: 11.5px; }
+.log-line {
+  display: flex; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, monospace;
+}
+.log-line:last-child { border-bottom: 0; }
+.log-ts { color: var(--muted); white-space: nowrap; }
+.log-ip { color: #9aa0a8; white-space: nowrap; }
+.log-ev { color: var(--primary); font-weight: 600; white-space: nowrap; }
+.log-detail { color: var(--text-soft); word-break: break-all; }
 
 .img-ctx-section button {
   display: flex; align-items: center; gap: 7px;
