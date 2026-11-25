@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>my-jizhang · 家庭记账本</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20261125a">
 </head>
 <body>
   <div class="app">
@@ -20,19 +20,31 @@
     </header>
 
     <div class="workspace">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <span class="sidebar-title">文档</span>
           <div class="sidebar-actions">
-            <button class="icon-btn" id="btn-new-folder" title="新建目录">
-              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2.5h4l1.5 2H14v9H2v-9h3.5z"/><path d="M8 6.5v5M5.5 9h5"/></svg>
+            <button class="icon-btn" id="btn-locate" title="定位打开的文档">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.5"/><circle cx="8" cy="8" r="6"/><path d="M8.5 2l-1-.1v-2M8.5 16l-1 .1v2M2 7.5l-.1-1h-2M16 8.5l.1-1h2"/></svg>
             </button>
-            <button class="icon-btn" id="btn-new-doc" title="新建文档">
-              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 1.8h4.4l3 3v9.4H4z"/><path d="M8.2 1.9v3.1h3.1"/><path d="M8 8v3.6M6.2 9.8h3.6"/></svg>
+            <button class="icon-btn" id="btn-foldall" title="全部展开 / 收起">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 5l4 4 4-4"/></svg>
+            </button>
+            <button class="icon-btn" id="btn-sidebar-more" title="更多">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor"><circle cx="3.5" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="12.5" cy="8" r="1.5"/></svg>
+            </button>
+            <button class="icon-btn" id="btn-sidebar-collapse" title="最小化侧边栏">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3.5L11 8l-5 4.5"/></svg>
             </button>
           </div>
         </div>
         <div class="tree" id="tree"></div>
+      </aside>
+
+      <aside class="sidebar-collapsed" id="sidebar-collapsed" hidden>
+        <button class="icon-btn expand-btn" title="展开侧边栏">
+          <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 3.5L5 8l5 4.5"/></svg>
+        </button>
       </aside>
 
       <main class="editor is-empty" id="editor">
@@ -88,8 +100,10 @@
 
   <input type="file" id="file-input" accept="image/*" hidden>
 
+  <!-- 通用右键菜单（目录树节点等） -->
   <div class="ctx-menu" id="ctx-menu"></div>
 
+  <!-- 图片浮动工具条（点击图片出现，保留旋转/缩放） -->
   <div class="img-bar" id="img-bar">
     <button data-act="rotl" title="向左旋转 90°">↺</button>
     <button data-act="rotr" title="向右旋转 90°">↻</button>
@@ -104,6 +118,84 @@
     <button data-act="del" class="danger" title="删除图片">删除</button>
   </div>
 
-  <script src="app.js"></script>
+  <!-- 图片右键菜单 -->
+  <div class="img-ctx-menu" id="img-ctx-menu" hidden>
+    <div class="img-ctx-section">
+      <div class="img-ctx-field">
+        <label>图片地址</label>
+        <input id="img-ctx-src" readonly>
+      </div>
+      <div class="img-ctx-field">
+        <label>标题</label>
+        <input id="img-ctx-title" placeholder="可选的图片标题">
+      </div>
+      <div class="img-ctx-field">
+        <label>提示文本</label>
+        <input id="img-ctx-alt" placeholder="图片加载失败时显示">
+      </div>
+    </div>
+    <div class="img-ctx-section">
+      <button data-act="copy-url"><span class="mi">⎘</span>复制地址</button>
+      <button data-act="copy-img"><span class="mi">⎘</span>复制图片</button>
+      <button data-act="del-img" class="danger"><span class="mi">✕</span>删除</button>
+    </div>
+    <div class="img-ctx-section">
+      <button data-act="rename"><span class="mi">✎</span>重命名</button>
+      <button data-act="align-center" data-align="center"><span class="mi">☰</span>居中</button>
+      <button data-act="align-left" data-align="left"><span class="mi">☰</span>居左</button>
+    </div>
+    <div class="img-ctx-section img-size-section">
+      <div class="img-size-control">
+        <button class="img-size-title" data-submenu="width">
+          宽度 <span class="sub-arrow">›</span>
+        </button>
+        <div class="img-size-sub" data-submenu="width">
+          <div class="img-size-row">
+            <input type="number" id="img-width-px" class="img-size-px" min="1" placeholder="px">
+            <span class="img-unit">px</span>
+          </div>
+          <div class="img-size-row">
+            <input type="range" id="img-width-pct" class="img-size-slider" min="10" max="200" step="5" value="100">
+            <span class="img-pct" id="img-width-pct-label">100%</span>
+          </div>
+          <div class="img-size-presets">
+            <button data-pct="25">25%</button>
+            <button data-pct="33">33%</button>
+            <button data-pct="50">50%</button>
+            <button data-pct="67">67%</button>
+            <button data-pct="75">75%</button>
+            <button data-pct="100">100%</button>
+          </div>
+          <button class="img-size-reset" data-reset="width">默认</button>
+        </div>
+      </div>
+      <div class="img-size-control">
+        <button class="img-size-title" data-submenu="height">
+          高度 <span class="sub-arrow">›</span>
+        </button>
+        <div class="img-size-sub" data-submenu="height">
+          <div class="img-size-row">
+            <input type="number" id="img-height-px" class="img-size-px" min="1" placeholder="px">
+            <span class="img-unit">px</span>
+          </div>
+          <div class="img-size-row">
+            <input type="range" id="img-height-pct" class="img-size-slider" min="10" max="200" step="5" value="100">
+            <span class="img-pct" id="img-height-pct-label">100%</span>
+          </div>
+          <div class="img-size-presets">
+            <button data-pct="25">25%</button>
+            <button data-pct="33">33%</button>
+            <button data-pct="50">50%</button>
+            <button data-pct="67">67%</button>
+            <button data-pct="75">75%</button>
+            <button data-pct="100">100%</button>
+          </div>
+          <button class="img-size-reset" data-reset="height">默认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=20261125a"></script>
 </body>
 </html>
