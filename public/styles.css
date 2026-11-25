@@ -38,7 +38,7 @@ body {
 button, select, input { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
 
-.app { display: flex; flex-direction: column; height: 100vh; min-height: 560px; }
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; min-height: 0; }
 
 /* ---------- 顶栏（标签栏） ---------- */
 .topbar {
@@ -190,6 +190,7 @@ button { cursor: pointer; }
 }
 
 .format-bar {
+  position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 2px;
   height: 36px; padding: 0 10px;
   border-bottom: 1px solid var(--border);
@@ -279,12 +280,12 @@ button { cursor: pointer; }
   margin: 10px 0 16px;
   border: 1px solid var(--lg-border, var(--border));
   border-radius: 4px;
-  overflow: hidden;
+  overflow-x: auto; overflow-y: hidden;
   background: var(--bg);
 }
 
 .ledger-table {
-  width: 100%; border-collapse: collapse;
+  width: 100%; min-width: 560px; border-collapse: collapse;
   table-layout: fixed;
   font-size: var(--lg-fs, 13px);
   font-weight: var(--lg-bold, normal);
@@ -738,9 +739,26 @@ button { cursor: pointer; }
 /* ---------- 窄屏 ---------- */
 @media (max-width: 760px) {
   .sidebar { width: 180px; }
-  .doc-inner { padding: 14px 16px 0; }
+  .doc-inner { padding: 12px 12px 0; }
   .doc-title { font-size: 23px; }
+
+  /* 顶栏精简，避免挤压重合 */
+  .topbar { padding: 0 6px; gap: 2px; }
+  .brand { padding-right: 4px; }
+  .brand-name { display: none; }
+  .topbar-right { gap: 4px; padding-left: 4px; }
+  .save-status { min-width: 0; font-size: 11px; }
+
+  /* 编辑工具栏允许换行，避免按钮重合 */
+  .format-bar {
+    flex-wrap: wrap; height: auto; min-height: 36px;
+    padding: 4px 8px; row-gap: 2px; overflow-x: visible;
+  }
+
+  /* 表格可横向滑动，内容列不被压没、金额不重合 */
+  .ledger-table { min-width: 520px; }
   .c-date { width: 108px; }
   .c-type { width: 74px; }
   .c-amount { width: 96px; }
+  .c-op { width: 30px; }
 }

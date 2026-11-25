@@ -992,6 +992,37 @@
     void input;
   }
 
+  /** 让字号下拉显示指定值；不在预设项时用一个动态项展示实际字号 */
+  function setFontSizeDisplay(px) {
+    if (!el.fontSize) return;
+    const n = Math.round(parseFloat(px));
+    if (!px || !Number.isFinite(n) || n <= 0) { el.fontSize.value = ''; return; }
+    const v = String(n);
+    let opt = Array.from(el.fontSize.options).find((o) => o.value === v && !o.dataset.dyn);
+    if (!opt) {
+      let dyn = el.fontSize.querySelector('option[data-dyn]');
+      if (!dyn) {
+        dyn = document.createElement('option');
+        dyn.dataset.dyn = '1';
+        el.fontSize.add(dyn, 1);
+      }
+      dyn.value = v; dyn.textContent = v;
+      opt = dyn;
+    }
+    el.fontSize.value = v;
+  }
+
+  /** 当前正文光标处的字号（px），用于工具栏实时显示 */
+  function currentCaretFontSize() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.anchorNode) return null;
+    if (!el.docBody.contains(sel.anchorNode)) return null;
+    const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    if (!node) return null;
+    const fs = parseFloat(window.getComputedStyle(node).fontSize);
+    return Number.isFinite(fs) ? fs : null;
+  }
+
   /** 聚焦表格输入框时，把工具栏状态同步为该框的样式 */
   function syncToolbarToInput(input) {
     if (!input) return;
@@ -1003,7 +1034,7 @@
     if (italBtn) italBtn.classList.toggle('active', cs.fontStyle === 'italic');
     if (undBtn) undBtn.classList.toggle('active', (cs.textDecorationLine || cs.textDecoration || '').includes('underline'));
     const fs = parseInt(cs.fontSize, 10);
-    if (el.fontSize) el.fontSize.value = (fs && fs >= 10) ? String(fs) : '';
+    setFontSizeDisplay(fs && fs >= 10 ? fs : null);
     if (el.fontColor) {
       const m = (cs.color || '').match(/\d+/g);
       if (m && m.length >= 3) {
@@ -1457,6 +1488,8 @@
         if (btn) btn.classList.toggle('active', document.queryCommandState(cmd));
       });
     } catch { /* ignore */ }
+    // 实时显示当前光标所在字号
+    setFontSizeDisplay(currentCaretFontSize());
   }
 
   /* ---------------- 设置 / 备份 / 导入导出 / 表格调宽 ---------------- */
@@ -1894,7 +1927,7 @@
       if (!px || !state.activeId) return;
       restoreSelection();
       applyFontSize(px);
-      markDirty(); el.fontSize.value = '';
+      markDirty(); setFontSizeDisplay(px);
     });
 
     el.fontColor.addEventListener('input', () => {
