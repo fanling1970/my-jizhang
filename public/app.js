@@ -12,6 +12,7 @@
     docScroll: $('#doc-scroll'),
     docBody: $('#doc-body'),
     docTitle: $('#doc-title'),
+    docBreadcrumb: $('#doc-breadcrumb'),
     saveStatus: $('#save-status'),
     formatBar: $('#format-bar'),
     fontSize: $('#font-size'),
@@ -172,14 +173,33 @@
     el.docBody.innerHTML = doc.content || '';
     state.dirty = false; setStatus('');
     hideImgBar(); hideImgCtxMenu();
+    renderBreadcrumb(doc);
     recalcTotals();
     el.docScroll.scrollTop = 0;
+  }
+
+  function renderBreadcrumb(doc) {
+    const chain = [];
+    let cur = doc;
+    let guard = 0;
+    while (cur && guard < 20) {
+      chain.unshift(cur);
+      cur = cur.parent_id ? findMeta(cur.parent_id) : null;
+      guard += 1;
+    }
+    if (el.docBreadcrumb) {
+      const parts = chain
+        .filter((item) => item && item.name)
+        .map((item) => `<span>${escapeHtml(item.name)}</span>`);
+      el.docBreadcrumb.innerHTML = parts.join('<i>/</i>');
+    }
   }
 
   function renderEmpty() {
     el.editor.classList.add('is-empty');
     el.docTitle.textContent = '';
     el.docBody.innerHTML = '';
+    if (el.docBreadcrumb) el.docBreadcrumb.innerHTML = '';
     state.dirty = false; currentImg = null;
     hideImgBar(); hideImgCtxMenu(); setStatus('');
   }
@@ -507,28 +527,89 @@
 
   /* ---------------- 收入 / 支出 ---------------- */
 
-  function createMoneyBlock(type, desc, amount) {
-    const isIncome = type === 'income';
-    const block = document.createElement('div');
-    block.className = `money-block ${isIncome ? 'income' : 'expense'}`;
-    block.dataset.type = type;
-    block.contentEditable = 'false';
-    block.innerHTML =
-      `<span class="money-badge" title="点击切换收入 / 支出">${isIncome ? '收入' : '支出'}</span>` +
-      `<label class="money-field">内容<input class="money-desc" value="${escapeAttr(desc || '')}" placeholder="如：买菜"></label>` +
-      `<label class="money-field">金额<input class="money-amount" type="number" step="0.01" min="0" value="${escapeAttr(amount || '')}" placeholder="0.00"></label>` +
-      '<span class="money-unit">元</span>' +
-      '<button class="money-del" type="button" title="删除这条记录">✕</button>';
-    return block;
+  /* ---------------- 收支表格（思源数据库风格） ---------------- */
+
+  function todayStr() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  function createLedgerRow(type, opts) {
+    const o = opts || {};
+    const tr = document.createElement('tr');
+    tr.className = 'ledger-row';
+    tr.dataset.type = type;
+    tr.innerHTML =
+      `<td class="c-date"><input type="date" class="lg-date" value="${o.date || todayStr()}"></td>` +
+      '<td class="c-type"><select class="lg-type">' +
+      `<option value="income"${type === 'income' ? ' selected' : ''}>收入</option>` +
+      `<option value="expense"${type === 'expense' ? ' selected' : ''}>支出</option>` +
+      '</select></td>' +
+      `<td class="c-desc"><input class="lg-desc" value="${escapeAttr(o.desc || '')}" placeholder="如：买菜"></td>` +
+      `<td class="c-amount num"><input class="lg-amount" type="number" step="0.01" min="0" value="${escapeAttr(o.amount || '')}" placeholder="0.00"></td>` +
+      '<td class="c-op"><button class="lg-del" type="button" title="删除该行">✕</button></td>';
+    return tr;
+  }
+
+  function createLedger(type) {
+    const wrap = document.createElement('div');
+    wrap.className = 'ledger';
+    wrap.contentEditable = 'false';
+    wrap.innerHTML =
+      '<table class="ledger-table">' +
+      '<thead><tr>' +
+      '<th class="c-date">日期</th><th class="c-type">类型</th><th class="c-desc">内容</th>' +
+      '<th class="c-amount">金额</th><th class="c-op"></th>' +
+      '</tr></thead><tbody></tbody>' +
+      '<tfoot><tr class="ledger-foot">' +
+      '<td colspan="3" class="lg-label">合计</td>' +
+      '<td colspan="2" class="lg-sum">' +
+      '<span class="lg-income">收入 ¥0.00</span>' +
+      '<span class="lg-expense">支出 ¥0.00</span>' +
+      '<span class="lg-balance">结余 ¥0.00</span>' +
+      '</td></tr></tfoot></table>' +
+      '<div class="ledger-bar">' +
+      '<button class="lg-add" data-type="income" type="button">＋ 收入</button>' +
+      '<button class="lg-add" data-type="expense" type="button">－ 支出</button>' +
+      '</div>';
+    wrap.querySelector('tbody').appendChild(createLedgerRow(type));
+    return wrap;
+  }
+
+  function findLedgerAtCaret() {
+    const range = getActiveRange();
+    if (!range) return null;
+    let n = range.startContainer;
+    if (n.nodeType !== 1) n = n.parentElement;
+    return n && n.closest ? n.closest('.ledger') : null;
+  }
+
+  function appendLedgerRow(ledger, type) {
+    const row = createLedgerRow(type);
+    ledger.querySelector('tbody').appendChild(row);
+    recalcTotals(); markDirty();
+    const desc = row.querySelector('.lg-desc');
+    if (desc) desc.focus();
+    row.scrollIntoView({ block: 'nearest' });
+    return row;
   }
 
   function insertMoney(type) {
     if (!state.activeId) return;
     restoreSelection();
-    const block = createMoneyBlock(type);
-    insertBlockAtCaret(block);
+    /* 光标在表格里 → 加到那张表；否则优先加到文档里已有的最后一张表 */
+    let target = findLedgerAtCaret();
+    if (!target) {
+      const ledgers = $$('.ledger', el.docBody);
+      target = ledgers.length ? ledgers[ledgers.length - 1] : null;
+    }
+    if (target) { appendLedgerRow(target, type); return; }
+    const ledger = createLedger(type);
+    insertBlockAtCaret(ledger);
     recalcTotals(); markDirty();
-    block.querySelector('.money-desc').focus();
+    const desc = ledger.querySelector('.lg-desc');
+    if (desc) desc.focus();
   }
 
   function createTotalBlock() {
@@ -551,21 +632,48 @@
     recalcTotals(); markDirty();
   }
 
+  function moneyText(v) { return '¥' + v.toFixed(2); }
+
   function recalcTotals() {
     let inc = 0, exp = 0;
+
+    /* 表格形态：每张表自己算小计，同时汇总到文档级 */
+    $$('.ledger', el.docBody).forEach((ledger) => {
+      let lInc = 0, lExp = 0;
+      $$('.ledger-row', ledger).forEach((row) => {
+        const input = row.querySelector('.lg-amount');
+        const v = parseFloat(input ? input.value : '');
+        if (!Number.isFinite(v)) return;
+        if (row.dataset.type === 'income') lInc += v; else lExp += v;
+      });
+      const foot = ledger.querySelector('.ledger-foot');
+      if (foot) {
+        const i = foot.querySelector('.lg-income');
+        const e = foot.querySelector('.lg-expense');
+        const b = foot.querySelector('.lg-balance');
+        if (i) i.textContent = '收入 ' + moneyText(lInc);
+        if (e) e.textContent = '支出 ' + moneyText(lExp);
+        if (b) b.textContent = '结余 ' + moneyText(lInc - lExp);
+      }
+      inc += lInc; exp += lExp;
+    });
+
+    /* 兼容历史数据里的单条收支块 */
     $$('.money-block', el.docBody).forEach((b) => {
       const input = b.querySelector('.money-amount');
       const v = parseFloat(input ? input.value : '');
       if (!Number.isFinite(v)) return;
       if (b.dataset.type === 'income') inc += v; else exp += v;
     });
+
+    /* 文档级合计卡 */
     $$('.total-block', el.docBody).forEach((b) => {
       const incEl = b.querySelector('.total-income');
       const expEl = b.querySelector('.total-expense');
       const balEl = b.querySelector('.total-balance');
-      if (incEl) incEl.textContent = '¥' + inc.toFixed(2);
-      if (expEl) expEl.textContent = '¥' + exp.toFixed(2);
-      if (balEl) balEl.textContent = '¥' + (inc - exp).toFixed(2);
+      if (incEl) incEl.textContent = moneyText(inc);
+      if (expEl) expEl.textContent = moneyText(exp);
+      if (balEl) balEl.textContent = moneyText(inc - exp);
     });
   }
 
@@ -927,11 +1035,22 @@
     /* 正文输入 */
     el.docBody.addEventListener('input', (event) => {
       const target = event.target;
-      if (target && target.matches && target.matches('.money-amount, .money-desc')) {
-        target.setAttribute('value', target.value);
+      if (target && target.matches && target.matches('.money-amount, .money-desc, .lg-amount, .lg-desc, .lg-date')) {
+        if (target.matches('.lg-amount, .lg-desc, .lg-date')) target.setAttribute('value', target.value);
+        else target.setAttribute('value', target.value);
         recalcTotals();
       }
       markDirty();
+    });
+
+    /* 收支表格：切换收支类型 */
+    el.docBody.addEventListener('change', (event) => {
+      const sel = event.target.closest ? event.target.closest('.lg-type') : null;
+      if (!sel) return;
+      const row = sel.closest('.ledger-row');
+      if (!row) return;
+      row.dataset.type = sel.value;
+      recalcTotals(); markDirty();
     });
 
     /* 正文点击 */
@@ -943,6 +1062,27 @@
       }
       const wrap = event.target.closest ? event.target.closest('.img-wrap, .img-grid') : null;
       if (!wrap && !el.imgBar.contains(event.target)) hideImgBar();
+
+      /* 收支表格：加一行 / 删一行 */
+      const addBtn = event.target.closest ? event.target.closest('.lg-add') : null;
+      if (addBtn) {
+        const ledger = addBtn.closest('.ledger');
+        if (ledger) appendLedgerRow(ledger, addBtn.dataset.type || 'expense');
+        return;
+      }
+      const rowDel = event.target.closest ? event.target.closest('.lg-del') : null;
+      if (rowDel) {
+        const row = rowDel.closest('.ledger-row');
+        const ledger = row ? row.closest('.ledger') : null;
+        if (row) row.remove();
+        if (ledger && !ledger.querySelector('.ledger-row')) {
+          const p = document.createElement('p');
+          ledger.replaceWith(p);
+          placeCaret(p, 0);
+        }
+        recalcTotals(); markDirty();
+        return;
+      }
 
       const delBtn = event.target.closest ? event.target.closest('.money-del') : null;
       if (delBtn) {
@@ -1079,8 +1219,18 @@
 
     /* 图片右键菜单 */
     el.imgCtxMenu.addEventListener('click', (event) => {
-      const btn = event.target.closest('button[data-act]');
+      const btn = event.target.closest('button');
       if (!btn || !imgCtxTarget) return;
+
+      /* 宽度 / 高度 折叠面板 */
+      if (btn.dataset.submenu) {
+        const key = btn.dataset.submenu;
+        const panel = el.imgCtxMenu.querySelector(`.img-size-sub[data-submenu="${key}"]`);
+        if (panel) panel.classList.toggle('open');
+        btn.classList.toggle('open');
+        return;
+      }
+
       const act = btn.dataset.act;
       if (act === 'align-center') {
         const wrap = imgCtxTarget.closest('.img-wrap');
@@ -1113,9 +1263,7 @@
         imgCtxTarget.title = el.imgCtxTitle.value.trim();
         imgCtxTarget.alt = el.imgCtxAlt.value.trim() || '记账凭证';
         markDirty();
-      } else if (btn.dataset.submenu) {
-        const key = btn.dataset.submenu;
-        $$(`.img-size-sub[data-submenu="${key}"]`, el.imgCtxMenu).forEach((el) => el.classList.toggle('open'));
+        setStatus('已更新图片信息');
       }
     });
 
@@ -1150,7 +1298,7 @@
       applyImgWidth(v, 'px');
       updateImgCtxSize();
     });
-    $$('.img-size-presets[data-submenu="width"] button, .img-size-presets button', el.imgCtxMenu).forEach((btn) => {
+    $$('.img-size-presets[data-kind="width"] button', el.imgCtxMenu).forEach((btn) => {
       btn.addEventListener('click', () => {
         if (!imgCtxTarget) return;
         const pct = Number(btn.dataset.pct);
@@ -1181,7 +1329,7 @@
       applyImgHeight(v, 'px');
       updateImgCtxSize();
     });
-    $$('.img-size-presets[data-submenu="height"] button', el.imgCtxMenu).forEach((btn) => {
+    $$('.img-size-presets[data-kind="height"] button', el.imgCtxMenu).forEach((btn) => {
       btn.addEventListener('click', () => {
         if (!imgCtxTarget) return;
         const pct = Number(btn.dataset.pct);

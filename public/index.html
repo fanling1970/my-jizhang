@@ -85,6 +85,7 @@
 
         <div class="doc-scroll" id="doc-scroll">
           <div class="doc-inner" id="doc-inner">
+            <div class="doc-breadcrumb" id="doc-breadcrumb"></div>
             <h1 class="doc-title" id="doc-title" contenteditable="true" spellcheck="false"></h1>
             <div class="doc-body" id="doc-body" contenteditable="true" spellcheck="false" data-placeholder="点击工具栏的「收入 / 支出」开始记录…"></div>
           </div>
@@ -158,7 +159,7 @@
             <input type="range" id="img-width-pct" class="img-size-slider" min="10" max="200" step="5" value="100">
             <span class="img-pct" id="img-width-pct-label">100%</span>
           </div>
-          <div class="img-size-presets">
+          <div class="img-size-presets" data-kind="width">
             <button data-pct="25">25%</button>
             <button data-pct="33">33%</button>
             <button data-pct="50">50%</button>
@@ -182,7 +183,7 @@
             <input type="range" id="img-height-pct" class="img-size-slider" min="10" max="200" step="5" value="100">
             <span class="img-pct" id="img-height-pct-label">100%</span>
           </div>
-          <div class="img-size-presets">
+          <div class="img-size-presets" data-kind="height">
             <button data-pct="25">25%</button>
             <button data-pct="33">33%</button>
             <button data-pct="50">50%</button>
@@ -196,6 +197,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261125a"></script>
+  <script src="app.js?v=20261125c"></script>
 </body>
 </html>
