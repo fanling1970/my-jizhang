@@ -104,22 +104,7 @@
   <!-- 通用右键菜单（目录树节点等） -->
   <div class="ctx-menu" id="ctx-menu"></div>
 
-  <!-- 图片浮动工具条（点击图片出现，保留旋转/缩放） -->
-  <div class="img-bar" id="img-bar">
-    <button data-act="rotl" title="向左旋转 90°">↺</button>
-    <button data-act="rotr" title="向右旋转 90°">↻</button>
-    <span class="img-sep"></span>
-    <button data-act="zoomout" title="按比例缩小">－</button>
-    <span class="img-size" id="img-size">0 × 0</span>
-    <button data-act="zoomin" title="按比例放大">＋</button>
-    <span class="img-sep"></span>
-    <button data-act="reset" title="恢复原始尺寸">原始</button>
-    <button data-act="fit" title="按宽度适应页面">适应宽度</button>
-    <span class="img-sep"></span>
-    <button data-act="del" class="danger" title="删除图片">删除</button>
-  </div>
-
-  <!-- 图片右键菜单 -->
+  <!-- 图片菜单（点图片右上角三点弹出） -->
   <div class="img-ctx-menu" id="img-ctx-menu" hidden>
     <div class="img-ctx-section">
       <div class="img-ctx-field">
@@ -138,7 +123,14 @@
     <div class="img-ctx-section">
       <button data-act="copy-url"><span class="mi">⎘</span>复制地址</button>
       <button data-act="copy-img"><span class="mi">⎘</span>复制图片</button>
+      <button data-act="cut-img"><span class="mi">✂</span>剪切</button>
       <button data-act="del-img" class="danger"><span class="mi">✕</span>删除</button>
+    </div>
+    <div class="img-ctx-section">
+      <button data-act="rotl"><span class="mi">↺</span>向左旋转 90°</button>
+      <button data-act="rotr"><span class="mi">↻</span>向右旋转 90°</button>
+      <button data-act="fit"><span class="mi">⇔</span>适应宽度</button>
+      <button data-act="reset"><span class="mi">↺</span>恢复原始尺寸</button>
     </div>
     <div class="img-ctx-section">
       <button data-act="rename"><span class="mi">✎</span>重命名</button>
@@ -197,6 +189,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261125c"></script>
+  <script src="app.js?v=20261125e"></script>
 </body>
 </html>

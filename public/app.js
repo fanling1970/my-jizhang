@@ -18,8 +18,6 @@
     fontSize: $('#font-size'),
     fileInput: $('#file-input'),
     ctxMenu: $('#ctx-menu'),
-    imgBar: $('#img-bar'),
-    imgSize: $('#img-size'),
     sidebar: $('#sidebar'),
     sidebarCollapsed: $('#sidebar-collapsed'),
     btnLocate: $('#btn-locate'),
@@ -67,7 +65,6 @@
   };
 
   let lastRange = null;
-  let currentImg = null;
   let ctxTargetId = null;
   let imgCtxTarget = null;
   let ctxMenuOpen = null; // 'ctx' | 'sidebar' | null
@@ -90,11 +87,13 @@
       opts.body = JSON.stringify(opts.body);
     }
     const res = await fetch(path, opts);
-    if (res.ok) return res;
-    const data = await res.json().catch(() => ({}));
-    const err = new Error(data.error || `HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const err = new Error((data && data.error) || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
   }
 
   const findMeta = (id) => state.docs.find((d) => d.id === id);
@@ -172,7 +171,7 @@
     el.docTitle.textContent = doc.name;
     el.docBody.innerHTML = doc.content || '';
     state.dirty = false; setStatus('');
-    hideImgBar(); hideImgCtxMenu();
+    hideImgCtxMenu();
     renderBreadcrumb(doc);
     recalcTotals();
     el.docScroll.scrollTop = 0;
@@ -200,8 +199,8 @@
     el.docTitle.textContent = '';
     el.docBody.innerHTML = '';
     if (el.docBreadcrumb) el.docBreadcrumb.innerHTML = '';
-    state.dirty = false; currentImg = null;
-    hideImgBar(); hideImgCtxMenu(); setStatus('');
+    state.dirty = false;
+    hideImgCtxMenu(); setStatus('');
   }
 
   async function createDoc(parentId, kind) {
@@ -451,29 +450,72 @@
   function markDirty() {
     state.dirty = true; setStatus('未保存');
     clearTimeout(state.saveTimer);
-    state.saveTimer = setTimeout(() => saveNow(), 700);
+    /* 打字即存：250ms 内的连续输入合并成一次请求 */
+    state.saveTimer = setTimeout(() => saveNow(), 250);
   }
-  function serialize() { return el.docBody.innerHTML; }
+
+  /** 把表格里的 select / input 的实时状态写回 HTML 属性，否则重载后会丢 */
+  function syncTables() {
+    $$('.ledger-row', el.docBody).forEach((row) => {
+      const sel = row.querySelector('.lg-type');
+      if (sel) {
+        row.dataset.type = sel.value;
+        Array.from(sel.options).forEach((opt) => {
+          if (opt.value === sel.value) opt.setAttribute('selected', 'selected');
+          else opt.removeAttribute('selected');
+        });
+      }
+      $$('input', row).forEach((inp) => inp.setAttribute('value', inp.value));
+    });
+    $$('.img-inline img', el.docBody).forEach((img) => {
+      const deg = Number(img.dataset.rotate || 0);
+      if (deg) img.style.transform = `rotate(${deg}deg)`;
+    });
+  }
+
+  function serialize() {
+    syncTables();
+    return el.docBody.innerHTML;
+  }
 
   async function saveNow() {
     if (!state.activeId || !state.dirty) return;
     if (state.savePromise) return state.savePromise;
     const id = state.activeId;
     const content = serialize();
+    state.dirty = false;
     setStatus('保存中…');
     state.savePromise = (async () => {
       try {
         await api(`/api/docs/${encodeURIComponent(id)}`, { method: 'PUT', body: { content } });
-        state.dirty = false; setStatus('已保存');
-      } catch (e) { setStatus('保存失败'); }
+        if (!state.dirty) setStatus('已保存');
+      } catch (e) { setStatus('保存失败'); state.dirty = true; }
       finally { state.savePromise = null; }
     })();
     await state.savePromise;
+    /* 保存过程中又有新的输入，再排一次 */
     if (state.dirty) {
       clearTimeout(state.saveTimer);
-      state.saveTimer = setTimeout(() => saveNow(), 500);
+      state.saveTimer = setTimeout(() => saveNow(), 250);
     }
   }
+
+  /** 页面即将关闭时用 sendBeacon 保证最后一次修改能送达 */
+  function flushSaveBeacon() {
+    if (!state.activeId) return;
+    if (!state.dirty) { if (state.savePromise) { /* 已在保存中，交给它 */ } return; }
+    clearTimeout(state.saveTimer);
+    const id = state.activeId;
+    const content = serialize();
+    const payload = new Blob([JSON.stringify({ content })], { type: 'application/json' });
+    let ok = false;
+    try {
+      ok = navigator.sendBeacon(`/api/docs/${encodeURIComponent(id)}`, payload);
+    } catch (e) { ok = false; }
+    if (ok) { state.dirty = false; setStatus('已保存'); }
+    else saveNow();
+  }
+
   async function flushSave() {
     clearTimeout(state.saveTimer);
     if (state.dirty) await saveNow();
@@ -508,21 +550,64 @@
     lastRange = range.cloneRange();
   }
 
+  /**
+   * 在光标所在行插入块级元素（不是插到下一行）。
+   * - 光标行是空行：直接用新块替换这一行
+   * - 光标在行中：把该行从光标处断成上下两段，新块插在中间
+   * - 找不到光标行：追加到末尾
+   */
   function insertBlockAtCaret(node) {
     const range = getActiveRange();
-    let anchor = el.docBody.lastElementChild;
+
+    /* 找光标所在的文本块 */
+    let block = null;
     if (range) {
       let n = range.startContainer;
       if (n.nodeType !== 1) n = n.parentElement;
-      while (n && n !== el.docBody && n.parentElement !== el.docBody) n = n.parentElement;
-      if (n && n.parentElement === el.docBody) anchor = n;
+      const cand = n && n.closest ? n.closest('p, li, blockquote, h1, h2, h3, h4, pre') : null;
+      if (cand && el.docBody.contains(cand)) block = cand;
     }
-    if (anchor && anchor.parentElement === el.docBody) anchor.after(node);
-    else el.docBody.appendChild(node);
-    const blank = document.createElement('p');
-    node.after(blank);
-    el.docScroll.scrollTop = el.docScroll.scrollHeight;
-    placeCaret(blank, 0);
+
+    if (!block) {
+      const last = el.docBody.lastElementChild;
+      if (last) last.after(node); else el.docBody.appendChild(node);
+      const blank = document.createElement('p');
+      node.after(blank);
+      placeCaret(blank, 0);
+      return;
+    }
+
+    const empty = !block.textContent.trim() && !block.querySelector('img, .img-inline, table');
+    if (empty) {
+      block.replaceWith(node);
+      const blank = document.createElement('p');
+      node.after(blank);
+      placeCaret(blank, 0);
+      return;
+    }
+
+    let tail = null;
+    try {
+      const after = range.cloneRange();
+      after.selectNodeContents(block);
+      after.setStart(range.endContainer, range.endOffset);
+      tail = block.cloneNode(false);
+      tail.appendChild(after.extractContents());
+      block.after(node);
+      if (tail.textContent.trim() || tail.querySelector('*')) {
+        node.after(tail);
+        placeCaret(tail, 0);
+      } else {
+        const blank = document.createElement('p');
+        node.after(blank);
+        placeCaret(blank, 0);
+      }
+    } catch (err) {
+      block.after(node);
+      const blank = document.createElement('p');
+      node.after(blank);
+      placeCaret(blank, 0);
+    }
   }
 
   /* ---------------- 收入 / 支出 ---------------- */
@@ -687,123 +772,108 @@
     });
   }
 
-  function insertImage(src, opts = {}) {
-    if (!state.activeId) return;
-    restoreSelection();
-    const wrap = document.createElement('div');
-    wrap.className = `img-wrap align-${opts.align || 'center'}`;
-    wrap.contentEditable = 'false';
+  /** 生成一行图片：<p class="img-line"><span class="img-inline"><img><button class="img-dots">⋮</button></span></p> */
+  function createImgLine(src, opts) {
+    const o = opts || {};
+    const line = document.createElement('p');
+    line.className = 'img-line';
+    const box = document.createElement('span');
+    box.className = 'img-inline';
+    box.contentEditable = 'false';
+
     const img = document.createElement('img');
     img.className = 'doc-img';
     img.dataset.rotate = '0';
-    img.alt = opts.alt || '记账凭证';
-    img.title = opts.title || '';
-    img.addEventListener('load', () => {
-      if (!img.style.width) {
-        const w = el.docBody.clientWidth || 720;
-        img.style.width = Math.min(img.naturalWidth || w, w) + 'px';
-      }
-      markDirty();
-    });
-    img.addEventListener('error', () => { setStatus('图片加载失败'); });
+    img.alt = o.alt || '记账凭证';
+    if (o.title) img.title = o.title;
+    img.addEventListener('error', () => setStatus('图片加载失败'));
     img.src = src;
-    wrap.appendChild(img);
-    insertBlockAtCaret(wrap);
-    markDirty();
+
+    const dots = document.createElement('button');
+    dots.type = 'button';
+    dots.className = 'img-dots';
+    dots.title = '图片菜单';
+    dots.textContent = '⋮';
+
+    box.appendChild(img);
+    box.appendChild(dots);
+    line.appendChild(box);
+    return line;
   }
 
-  function insertImgGrid(srcs) {
+  /** 插入一张图片（在光标所在行） */
+  function insertImage(src, opts) {
+    if (!state.activeId) return;
+    restoreSelection();
+    const line = createImgLine(src, opts);
+    insertBlockAtCaret(line);
+    markDirty();
+    saveNow();
+  }
+
+  /** 一次插入多张：每张一行，互不关联，可单独删除 */
+  function insertImages(srcs) {
     if (!state.activeId || !srcs.length) return;
     restoreSelection();
-    const grid = document.createElement('div');
-    grid.className = 'img-grid';
-    grid.contentEditable = 'false';
-    srcs.forEach((src) => {
-      const img = document.createElement('img');
-      img.className = 'doc-img';
-      img.dataset.rotate = '0';
-      img.alt = '记账凭证';
-      img.src = src;
-      img.addEventListener('load', () => {
-        if (!img.style.width) img.style.width = '';
-        markDirty();
-      });
-      grid.appendChild(img);
-    });
-    insertBlockAtCaret(grid);
+    let cursor = createImgLine(srcs[0]);
+    insertBlockAtCaret(cursor);
+    for (let i = 1; i < srcs.length; i += 1) {
+      const line = createImgLine(srcs[i]);
+      cursor.after(line);
+      cursor = line;
+    }
     markDirty();
+    saveNow();
   }
 
   /* 浮动工具条 */
-  function showImgBar(img) {
-    currentImg = img;
-    el.imgBar.classList.add('show');
-    positionImgBar();
+  function rotateImg(img, delta) {
+    if (!img) return;
+    const cur = Number(img.dataset.rotate || 0) + delta;
+    const next = ((cur % 360) + 360) % 360;
+    img.dataset.rotate = String(next);
+    img.style.transform = `rotate(${next}deg)`;
+    markDirty();
   }
-  function positionImgBar() {
-    if (!currentImg || !document.body.contains(currentImg)) { hideImgBar(); return; }
-    const rect = currentImg.getBoundingClientRect();
-    const bw = el.imgBar.offsetWidth || 330;
-    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - bw / 2, window.innerWidth - bw - 8));
-    let top = rect.top - 42;
-    if (top < 8) top = rect.bottom + 8;
-    el.imgBar.style.left = `${left}px`;
-    el.imgBar.style.top = `${top}px`;
-    el.imgSize.textContent = `${Math.round(rect.width)} × ${Math.round(rect.height)}`;
-  }
-  function hideImgBar() { currentImg = null; el.imgBar.classList.remove('show'); }
 
-  function zoomImg(f) {
-    if (!currentImg) return;
+  function resetImg(img) {
+    if (!img) return;
     const cw = el.docBody.clientWidth || 720;
-    let w = parseFloat(currentImg.style.width);
-    if (!Number.isFinite(w)) w = Math.min(currentImg.naturalWidth || cw, cw);
-    w = Math.max(60, Math.min(w * f, cw * 3));
-    currentImg.style.width = Math.round(w) + 'px';
-    currentImg.style.height = '';
-    markDirty(); positionImgBar();
+    img.style.width = Math.min(img.naturalWidth || cw, cw) + 'px';
+    img.style.height = '';
+    img.style.transform = '';
+    img.dataset.rotate = '0';
+    markDirty();
     updateImgCtxSize();
   }
-  function rotateImg(delta) {
-    if (!currentImg) return;
-    const cur = Number(currentImg.dataset.rotate || 0) + delta;
-    const next = ((cur % 360) + 360) % 360;
-    currentImg.dataset.rotate = String(next);
-    currentImg.style.transform = `rotate(${next}deg)`;
-    markDirty(); positionImgBar();
-  }
-  function resetImg() {
-    if (!currentImg) return;
-    const cw = el.docBody.clientWidth || 720;
-    currentImg.style.width = Math.min(currentImg.naturalWidth || cw, cw) + 'px';
-    currentImg.style.height = '';
-    currentImg.style.transform = '';
-    currentImg.dataset.rotate = '0';
-    markDirty(); positionImgBar(); updateImgCtxSize();
-  }
-  function fitImgWidth() {
-    if (!currentImg) return;
-    currentImg.style.width = (el.docBody.clientWidth || 720) + 'px';
-    markDirty(); positionImgBar(); updateImgCtxSize();
+
+  function fitImgWidth(img) {
+    if (!img) return;
+    img.style.width = (el.docBody.clientWidth || 720) + 'px';
+    img.style.height = '';
+    markDirty();
+    updateImgCtxSize();
   }
 
-  /* 图片右键菜单 */
+  /* 图片菜单：由图片右上角三点弹出 */
   function showImgCtxMenu(x, y, img) {
     hideCtxMenu();
-    hideImgBar();
     imgCtxTarget = img;
     el.imgCtxSrc.value = img.src;
     el.imgCtxTitle.value = img.title || '';
     el.imgCtxAlt.value = img.alt || '';
-    // 重置子菜单面板
-    $$('.img-size-sub.open', el.imgCtxMenu).forEach((el) => el.classList.remove('open'));
+    /* 重置子菜单面板 */
+    $$('.img-size-sub.open', el.imgCtxMenu).forEach((n) => n.classList.remove('open'));
+    $$('.img-size-title.open', el.imgCtxMenu).forEach((n) => n.classList.remove('open'));
     updateImgCtxSize();
     el.imgCtxMenu.hidden = false;
+    el.imgCtxMenu.style.left = `${Math.min(x, window.innerWidth - 348)}px`;
+    el.imgCtxMenu.style.top = `${Math.min(y, window.innerHeight - 120)}px`;
+    el.imgCtxMenu.classList.add('show');
     requestAnimationFrame(() => {
       const w = el.imgCtxMenu.offsetWidth, h = el.imgCtxMenu.offsetHeight;
-      el.imgCtxMenu.style.left = `${Math.min(x, window.innerWidth - w - 8)}px`;
-      el.imgCtxMenu.style.top = `${Math.min(y, window.innerHeight - h - 8)}px`;
-      el.imgCtxMenu.classList.add('show');
+      el.imgCtxMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - w - 8))}px`;
+      el.imgCtxMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - h - 8))}px`;
     });
   }
   function hideImgCtxMenu() {
@@ -846,7 +916,7 @@
     if (imgCtxTarget.naturalWidth && imgCtxTarget.naturalHeight) {
       imgCtxTarget.style.height = '';
     }
-    markDirty(); positionImgBar();
+    markDirty();
   }
 
   function applyImgHeight(pctOrPx, unit) {
@@ -856,7 +926,7 @@
     else h = pctOrPx;
     h = Math.max(20, Math.min(h, 1600));
     imgCtxTarget.style.height = Math.round(h) + 'px';
-    markDirty(); positionImgBar();
+    markDirty();
   }
 
   /* ---------------- 富文本 ---------------- */
@@ -1055,13 +1125,18 @@
 
     /* 正文点击 */
     el.docBody.addEventListener('click', (event) => {
-      const img = event.target.closest ? event.target.closest('.doc-img') : null;
-      if (img) {
-        showImgBar(img);
+      /* 图片右上角三点 → 弹出图片菜单 */
+      const dots = event.target.closest ? event.target.closest('.img-dots') : null;
+      if (dots) {
+        event.preventDefault();
+        event.stopPropagation();
+        const img = dots.parentElement.querySelector('img.doc-img');
+        if (img) {
+          const r = dots.getBoundingClientRect();
+          showImgCtxMenu(r.right, r.bottom + 4, img);
+        }
         return;
       }
-      const wrap = event.target.closest ? event.target.closest('.img-wrap, .img-grid') : null;
-      if (!wrap && !el.imgBar.contains(event.target)) hideImgBar();
 
       /* 收支表格：加一行 / 删一行 */
       const addBtn = event.target.closest ? event.target.closest('.lg-add') : null;
@@ -1106,13 +1181,7 @@
       }
     });
 
-    el.docBody.addEventListener('contextmenu', (event) => {
-      const img = event.target.closest ? event.target.closest('.doc-img') : null;
-      if (img) {
-        event.preventDefault();
-        showImgCtxMenu(event.clientX, event.clientY, img);
-      }
-    });
+    /* 图片不再响应右键（改用右上角三点菜单） */
 
     /* 粘贴图片 */
     el.docBody.addEventListener('paste', async (event) => {
@@ -1126,7 +1195,7 @@
         if (file) urls.push(await readFileAsDataUrl(file));
       }
       if (urls.length === 1) insertImage(urls[0]);
-      else insertImgGrid(urls);
+      else insertImages(urls);
     });
 
     /* 工具栏 */
@@ -1169,7 +1238,7 @@
       const urls = [];
       for (const f of imgs) urls.push(await readFileAsDataUrl(f));
       if (urls.length === 1) insertImage(urls[0]);
-      else insertImgGrid(urls);
+      else insertImages(urls);
     });
 
     $('#btn-net-image').addEventListener('click', () => {
@@ -1186,38 +1255,7 @@
     $('#btn-expense').addEventListener('click', () => insertMoney('expense'));
     $('#btn-total').addEventListener('click', () => insertTotal());
 
-    /* 浮动工具条 */
-    el.imgBar.addEventListener('click', (event) => {
-      const btn = event.target.closest('button[data-act]');
-      if (!btn || !currentImg) return;
-      const act = btn.dataset.act;
-      if (act === 'rotl') rotateImg(-90);
-      else if (act === 'rotr') rotateImg(90);
-      else if (act === 'zoomout') zoomImg(0.9);
-      else if (act === 'zoomin') zoomImg(1.1);
-      else if (act === 'reset') resetImg();
-      else if (act === 'fit') fitImgWidth();
-      else if (act === 'del') {
-        const parent = currentImg.closest('.img-wrap, .img-grid');
-        const grid = currentImg.closest('.img-grid');
-        if (grid && grid.children.length > 1) {
-          currentImg.remove();
-          if (grid.children.length <= 1) {
-            // 只剩一张，转成单图
-            const remaining = grid.firstElementChild;
-            const wrap = document.createElement('div');
-            wrap.className = 'img-wrap align-center';
-            wrap.contentEditable = 'false';
-            remaining.before(wrap);
-            wrap.appendChild(remaining);
-            grid.remove();
-          }
-        } else if (parent) parent.remove();
-        hideImgBar(); markDirty();
-      }
-    });
-
-    /* 图片右键菜单 */
+    /* 图片菜单（由图片右上角三点触发） */
     el.imgCtxMenu.addEventListener('click', (event) => {
       const btn = event.target.closest('button');
       if (!btn || !imgCtxTarget) return;
@@ -1228,43 +1266,50 @@
         const panel = el.imgCtxMenu.querySelector(`.img-size-sub[data-submenu="${key}"]`);
         if (panel) panel.classList.toggle('open');
         btn.classList.toggle('open');
+        requestAnimationFrame(() => {
+          const h = el.imgCtxMenu.offsetHeight;
+          const top = parseFloat(el.imgCtxMenu.style.top) || 8;
+          el.imgCtxMenu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - h - 8))}px`;
+        });
         return;
       }
 
       const act = btn.dataset.act;
-      if (act === 'align-center') {
-        const wrap = imgCtxTarget.closest('.img-wrap');
-        if (wrap) { wrap.classList.remove('align-left', 'align-right'); wrap.classList.add('align-center'); markDirty(); }
-      } else if (act === 'align-left') {
-        const wrap = imgCtxTarget.closest('.img-wrap');
-        if (wrap) { wrap.classList.remove('align-center', 'align-right'); wrap.classList.add('align-left'); markDirty(); }
+      const line = imgCtxTarget.closest('.img-line');
+
+      if (act === 'align-center' || act === 'align-left' || act === 'align-right') {
+        if (line) {
+          line.classList.remove('align-left', 'align-right');
+          if (act === 'align-left') line.classList.add('align-left');
+          if (act === 'align-right') line.classList.add('align-right');
+        }
       } else if (act === 'copy-url') {
         navigator.clipboard?.writeText(imgCtxTarget.src);
         setStatus('已复制图片地址');
       } else if (act === 'copy-img') {
-        setStatus('复制图片（浏览器限制，建议直接复制地址）');
+        if (line) line.after(createImgLine(imgCtxTarget.src, { alt: imgCtxTarget.alt, title: imgCtxTarget.title }));
+      } else if (act === 'cut-img') {
+        if (line) line.replaceWith(createImgLine(imgCtxTarget.src, { alt: imgCtxTarget.alt, title: imgCtxTarget.title }));
       } else if (act === 'del-img') {
-        const parent = imgCtxTarget.closest('.img-wrap, .img-grid');
-        const grid = imgCtxTarget.closest('.img-grid');
-        if (grid && grid.children.length > 1) {
-          imgCtxTarget.remove();
-          if (grid.children.length <= 1) {
-            const remaining = grid.firstElementChild;
-            const wrap = document.createElement('div');
-            wrap.className = 'img-wrap align-center';
-            wrap.contentEditable = 'false';
-            remaining.before(wrap);
-            wrap.appendChild(remaining);
-            grid.remove();
-          }
-        } else if (parent) parent.remove();
-        hideImgCtxMenu(); markDirty();
+        /* 只删当前这一张，不影响其它图片 */
+        if (line) line.remove(); else imgCtxTarget.remove();
+        hideImgCtxMenu();
+        markDirty(); saveNow();
+        return;
+      } else if (act === 'rotl') {
+        rotateImg(imgCtxTarget, -90);
+      } else if (act === 'rotr') {
+        rotateImg(imgCtxTarget, 90);
+      } else if (act === 'fit') {
+        fitImgWidth(imgCtxTarget);
+      } else if (act === 'reset') {
+        resetImg(imgCtxTarget);
       } else if (act === 'rename') {
         imgCtxTarget.title = el.imgCtxTitle.value.trim();
         imgCtxTarget.alt = el.imgCtxAlt.value.trim() || '记账凭证';
-        markDirty();
         setStatus('已更新图片信息');
       }
+      markDirty();
     });
 
     el.imgCtxSrc.addEventListener('click', () => {
@@ -1346,19 +1391,15 @@
     });
 
     /* 滚动与窗口 */
-    el.docScroll.addEventListener('scroll', () => { hideImgBar(); hideImgCtxMenu(); });
+    el.docScroll.addEventListener('scroll', hideImgCtxMenu);
     window.addEventListener('resize', () => {
-      if (currentImg) positionImgBar();
       if (imgCtxTarget) updateImgCtxSize();
     });
 
     /* 点击空白处关闭菜单 */
     document.addEventListener('mousedown', (event) => {
       if (!el.ctxMenu.contains(event.target)) hideCtxMenu();
-      if (!el.imgCtxMenu.contains(event.target) && !event.target.closest('.doc-img')) hideImgCtxMenu();
-      if (!el.imgBar.contains(event.target) && !event.target.closest('.doc-img') && !event.target.closest('.img-bar')) {
-        hideImgBar();
-      }
+      if (!el.imgCtxMenu.contains(event.target) && !event.target.closest('.img-dots')) hideImgCtxMenu();
     });
 
     document.addEventListener('keydown', (event) => {
@@ -1366,12 +1407,15 @@
         event.preventDefault(); flushSave();
       }
       if (event.key === 'Escape') {
-        hideImgBar(); hideCtxMenu(); hideImgCtxMenu();
+        hideCtxMenu(); hideImgCtxMenu();
       }
     });
 
-    document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
-    window.addEventListener('beforeunload', () => { if (state.dirty) saveNow(); });
+    /* 立即保存：切到后台 / 关页面 / 失焦都用 sendBeacon 兜底 */
+    document.addEventListener('visibilitychange', () => { if (document.hidden) flushSaveBeacon(); });
+    window.addEventListener('pagehide', flushSaveBeacon);
+    window.addEventListener('beforeunload', flushSaveBeacon);
+    window.addEventListener('blur', () => { if (state.dirty) saveNow(); });
   }
 
   /* ---------------- 启动 ---------------- */
@@ -1403,6 +1447,9 @@
     }
 
     document.execCommand('defaultParagraphSeparator', false, 'p');
+
+    /* 兜底：每 5 秒检查一次，有未保存内容就落盘 */
+    setInterval(() => { if (state.dirty) saveNow(); }, 5000);
   }
 
   init();

@@ -217,7 +217,7 @@ async function handleApi(req, res, pathname) {
 
     if (req.method === 'GET') return sendJson(res, 200, doc);
 
-    if (req.method === 'PUT') {
+    if (req.method === 'PUT' || req.method === 'POST') {
       const body = await readBody(req);
       if (typeof body.name === 'string' && body.name.trim()) doc.name = body.name.trim();
       if (typeof body.content === 'string') doc.content = body.content;
