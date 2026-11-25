@@ -1,15 +1,19 @@
 /**
- * my-jizhang 家庭记账本服务端（安全增强版）
+ * my-jizhang 家庭记账本服务端（密码自加密版）
  * 零依赖：仅使用 Node 内置模块。
  *
- * 新增能力：
- *   - 数据静态加密（AES-256-GCM，密钥存放在单独的 master.key 文件）
- *   - 旧明文 ledger.json 自动迁移为加密格式
- *   - 登录认证（scrypt 密码哈希 + 会话 Cookie），首次启动生成初始密码
- *   - 修改密码（需旧密码），改密后其它设备会话失效
- *   - 自动备份（定时 + 手动 + 保留轮数），备份文件同样加密，路径收口防穿越
- *   - 审计日志（登录/登出/改密/文档增删改/导入导出/备份）JSONL + 按大小轮转
- *   - CSRF 防护（SameSite=Strict Cookie + Origin 校验）
+ * 加密模型：
+ *   - 不再使用独立的 master.key 文件。
+ *   - 加密密钥 = scrypt(登录密码, salt)，AES-256-GCM。
+ *   - 每个加密包（数据文件 / 备份 / 导出 / 登录校验哨兵）都内嵌自身的 salt 与参数，
+ *     解密时用「当前登录密码 + 包内 salt」重新派生密钥。
+ *     因此同密码即可解密（换机器、跨实例也行），换密码则旧包全部失效。
+ *   - 登录校验：auth.json 是一个用密钥加密的固定哨兵字符串；派生密钥能解开哨兵即密码正确。
+ *     登录与数据解密共用同一把密钥，天然绑定。
+ *   - 旧 master.key 数据在首次登录成功后自动迁移为密码加密，成功后删除 master.key。
+ *
+ * 其它：
+ *   - 会话 Cookie / CSRF / 限速 / 审计 / 自动备份（路径收口防穿越）。
  *
  * 适用：ARM64 路由器 / NAS 等小内存设备，容器内 8080 端口。
  */
@@ -27,6 +31,7 @@ const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT_DIR, 'data'));
 const DATA_FILE = path.join(DATA_DIR, 'ledger.json');
+// 仅用于迁移旧数据，迁移成功后删除；不再作为运行时依赖。
 const KEY_FILE = path.resolve(process.env.KEY_FILE || path.join(DATA_DIR, 'master.key'));
 const AUTH_FILE = path.resolve(process.env.AUTH_FILE || path.join(DATA_DIR, 'auth.json'));
 const AUDIT_FILE = path.resolve(process.env.AUDIT_FILE || path.join(DATA_DIR, 'audit.log'));
@@ -34,6 +39,9 @@ const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(DATA_DIR, 'b
 const PORT = Number(process.env.PORT || 8080);
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
+const BLOB_VERSION = 2;
+const KDF = 'scrypt';
+const SENTINEL = 'mj-verifier-v2';
 const SESSION_TTL = Number(process.env.SESSION_TTL_MS || 7 * 24 * 3600 * 1000);
 const BACKUP_INTERVAL = Number(process.env.BACKUP_INTERVAL_MS || 24 * 3600 * 1000);
 const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 30));
@@ -44,7 +52,11 @@ const BODY_LIMIT = 25 * 1024 * 1024;
 
 let db = { docs: [] };
 let persistChain = Promise.resolve();
-let masterKey = null; // 32 bytes
+// 登录成功后缓存：当前密码派生的密钥、对应 salt、以及明文密码（用于导入/恢复时按包内 salt 重派生）
+let currentKey = null;
+let currentSalt = null;
+let currentPassword = null;
+let storeLoaded = false;
 const sessions = new Map(); // token -> { expires }
 const loginFails = new Map(); // ip -> { count, until }
 
@@ -93,38 +105,47 @@ const SAMPLE_NOVEMBER = [
 
 async function ensureDir(dir) { await mkdir(dir, { recursive: true }); }
 
-async function loadKey() {
-  await ensureDir(path.dirname(KEY_FILE));
-  try {
-    const buf = await readFile(KEY_FILE);
-    if (buf.length === 32) { masterKey = buf; return; }
-  } catch { /* 不存在则创建 */ }
-  masterKey = randomBytes(32);
-  await writeFile(KEY_FILE, masterKey);
-  try { await chmod(KEY_FILE, 0o600); } catch { /* Windows 忽略 */ }
-  console.log('[my-jizhang] 已生成新的主密钥文件：' + KEY_FILE + '（请妥善备份，丢失则无法解密数据）');
+function deriveKey(password, salt, params) {
+  const p = params || SCRYPT;
+  return scryptSync(String(password), salt, p.keylen, { N: p.N, r: p.r, p: p.p });
 }
 
-function encryptJson(obj) {
+/** 用指定 key 加密 obj，salt 写入包内（自描述）。返回 JSON 字符串。 */
+function encryptBlob(obj, key, salt) {
   const plain = Buffer.from(JSON.stringify(obj), 'utf8');
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', masterKey, iv);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
   const enc = Buffer.concat([cipher.update(plain), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return JSON.stringify({ v: 1, iv: iv.toString('hex'), tag: tag.toString('hex'), data: enc.toString('hex') });
+  return JSON.stringify({
+    v: BLOB_VERSION,
+    kdf: KDF,
+    params: SCRYPT,
+    salt: salt.toString('hex'),
+    iv: iv.toString('hex'),
+    tag: tag.toString('hex'),
+    data: enc.toString('hex'),
+  });
 }
 
-function decryptJson(raw) {
+function parseBlob(raw) {
+  if (typeof raw !== 'string') return null;
   let parsed;
   try { parsed = JSON.parse(raw); } catch { return null; }
-  if (!parsed || typeof parsed !== 'object' || !parsed.iv || !parsed.tag || !parsed.data) {
-    return null; // 不是加密格式
-  }
+  if (!parsed || parsed.v !== BLOB_VERSION || !parsed.salt || !parsed.iv || !parsed.tag || !parsed.data) return null;
+  return parsed;
+}
+
+/** 用已知 key 解密（包内 salt 仅用于校验，key 必须与加密时一致）。
+ *  返回：obj 成功；null=不是 v2 加密包；{__decryptError:true}=解密失败（密钥不对/损坏）。 */
+function decryptBlobWith(raw, key) {
+  const parsed = parseBlob(raw);
+  if (!parsed) return null;
   try {
     const iv = Buffer.from(parsed.iv, 'hex');
     const tag = Buffer.from(parsed.tag, 'hex');
     const enc = Buffer.from(parsed.data, 'hex');
-    const decipher = createDecipheriv('aes-256-gcm', masterKey, iv);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([decipher.update(enc), decipher.final()]);
     return JSON.parse(plain.toString('utf8'));
@@ -133,49 +154,76 @@ function decryptJson(raw) {
   }
 }
 
+/** 用密码解密任意 v2 包：先从包内取 salt/params 派生 key，再解密。
+ *  同密码即可解开任何同密码生成的包（跨 salt、跨实例）。 */
+function decryptBlob(raw, password) {
+  const parsed = parseBlob(raw);
+  if (!parsed) return null;
+  let key;
+  try { key = deriveKey(password, Buffer.from(parsed.salt, 'hex'), parsed.params); } catch { return { __decryptError: true }; }
+  return decryptBlobWith(raw, key);
+}
+
+/** 旧版（v:1，master.key）数据解密，仅用于迁移。 */
+async function decryptLegacyMaster(raw) {
+  let key;
+  try { key = await readFile(KEY_FILE); } catch { return null; }
+  if (key.length !== 32) return null;
+  try {
+    const p = JSON.parse(raw);
+    if (!p || !p.iv || !p.tag || !p.data) return null;
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(p.iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(p.tag, 'hex'));
+    const plain = Buffer.concat([decipher.update(Buffer.from(p.data, 'hex')), decipher.final()]);
+    return JSON.parse(plain.toString('utf8'));
+  } catch { return null; }
+}
+
 /* ---------------- 密码 / 会话 ---------------- */
+
+/** 返回 {format:'new', blob} | {format:'old', auth} | null */
+async function loadAuth() {
+  await ensureDir(path.dirname(AUTH_FILE));
+  let raw;
+  try { raw = await readFile(AUTH_FILE, 'utf8'); } catch { return null; }
+  const blob = parseBlob(raw);
+  if (blob) return { format: 'new', blob };
+  try {
+    const a = JSON.parse(raw);
+    if (a && a.hash && a.salt) return { format: 'old', auth: a };
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function writeAuthVerifier(key, salt) {
+  await ensureDir(path.dirname(AUTH_FILE));
+  await writeFile(AUTH_FILE, encryptBlob(SENTINEL, key, salt), 'utf8');
+  try { await chmod(AUTH_FILE, 0o600); } catch { /* Windows 忽略 */ }
+}
 
 function hashPw(password, salt) {
   return scryptSync(String(password), salt, SCRYPT.keylen, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p });
 }
 
-async function loadAuth() {
-  await ensureDir(path.dirname(AUTH_FILE));
-  try {
-    const raw = await readFile(AUTH_FILE, 'utf8');
-    const a = JSON.parse(raw);
-    if (a && a.hash && a.salt) return a;
-  } catch { /* 首次运行 */ }
-  return null;
-}
-
-async function writeAuth(password) {
-  const salt = randomBytes(16);
-  const hash = hashPw(password, salt);
-  await writeFile(AUTH_FILE, JSON.stringify({
-    hash: hash.toString('hex'),
-    salt: salt.toString('hex'),
-    params: SCRYPT,
-  }));
-  try { await chmod(AUTH_FILE, 0o600); } catch { /* ignore */ }
-}
-
-function verifyPassword(password, auth) {
-  if (!auth || !auth.hash || !auth.salt) return false;
-  const salt = Buffer.from(auth.salt, 'hex');
-  const expected = Buffer.from(auth.hash, 'hex');
+/** 校验登录密码。成功返回派生 key（新版）或 'legacy'（旧版哈希，需迁移）；失败返回 null。 */
+function verifyAuth(password, loaded) {
+  if (!loaded) return null;
+  if (loaded.format === 'new') {
+    let key;
+    try { key = deriveKey(password, Buffer.from(loaded.blob.salt, 'hex'), loaded.blob.params); } catch { return null; }
+    const dec = decryptBlobWith(JSON.stringify(loaded.blob), key);
+    if (dec === SENTINEL) return key;
+    return null;
+  }
+  // 旧版哈希校验
+  const a = loaded.auth;
+  const salt = Buffer.from(a.salt, 'hex');
+  const expected = Buffer.from(a.hash, 'hex');
   let actual;
-  try { actual = hashPw(password, salt); } catch { return false; }
-  if (actual.length !== expected.length) return false;
-  return timingSafeEqual(actual, expected);
-}
-
-function randomPassword(len = 10) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  const bytes = randomBytes(len);
-  let out = '';
-  for (let i = 0; i < len; i += 1) out += chars[bytes[i] % chars.length];
-  return out;
+  try { actual = hashPw(password, salt); } catch { return null; }
+  if (actual.length !== expected.length) return null;
+  try { if (timingSafeEqual(actual, expected)) return 'legacy'; } catch { return null; }
+  return null;
 }
 
 function createSession() {
@@ -260,14 +308,13 @@ function safeBackupPath(name) {
 }
 
 async function createBackup() {
+  if (!currentKey) return null; // 尚未登录加载数据，跳过
   await ensureDir(BACKUP_DIR);
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   const name = `ledger-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.enc`;
-  // 始终用内存中的数据重新加密后写备份，保证备份文件一定是加密的
   const dest = path.join(BACKUP_DIR, name);
-  await writeFile(dest, encryptJson(db), 'utf8');
-  // 轮转：只保留最近 BACKUP_KEEP 个
+  await writeFile(dest, encryptBlob(db, currentKey, currentSalt), 'utf8');
   const list = await listBackups();
   for (const old of list.slice(BACKUP_KEEP)) {
     try { await unlink(path.join(BACKUP_DIR, old.name)); } catch { /* ignore */ }
@@ -278,10 +325,11 @@ async function createBackup() {
 async function restoreBackup(name) {
   const full = safeBackupPath(name);
   if (!full) throw new Error('非法的备份文件名');
+  if (!currentPassword) throw new Error('尚未登录，无法解密备份');
   const raw = await readFile(full, 'utf8');
-  const decrypted = decryptJson(raw);
+  const decrypted = decryptBlob(raw, currentPassword);
   if (!decrypted || decrypted.__decryptError || !Array.isArray(decrypted.docs)) {
-    throw new Error('备份文件无法解密或格式不正确');
+    throw new Error('备份文件无法解密（可能是更换密码前的旧备份，已失效）');
   }
   db = decrypted;
   await persist();
@@ -305,35 +353,85 @@ function seed() {
   }
 }
 
-async function initStore() {
-  await ensureDir(DATA_DIR);
-  let loaded = false;
-  try {
-    const raw = await readFile(DATA_FILE, 'utf8');
-    const decrypted = decryptJson(raw);
-    if (decrypted && !decrypted.__decryptError && Array.isArray(decrypted.docs)) {
-      db = decrypted; loaded = true;
-    } else if (decrypted && decrypted.__decryptError) {
-      // 加密了但密钥不对 → 无法加载
-      console.error('[my-jizhang] 数据解密失败：主密钥不匹配。请确认 master.key 与创建数据时一致。');
-      db = { docs: [] }; loaded = true;
-    } else {
-      // 旧明文格式 → 直接用，下次持久化时会加密（兼容可能的 BOM）
-      try {
-        const legacy = JSON.parse(raw.replace(/^\uFEFF/, ''));
-        if (legacy && Array.isArray(legacy.docs)) { db = legacy; loaded = true; }
-      } catch { /* 损坏 */ }
-    }
-  } catch { /* 文件不存在 */ }
+async function readLedgerRaw() {
+  try { return await readFile(DATA_FILE, 'utf8'); } catch { return null; }
+}
 
-  if (db.docs.length === 0 && !loaded) {
-    seed();
-    await persist();
+function ledgerFormat(raw) {
+  if (!raw) return 'empty';
+  if (parseBlob(raw)) return 'new';
+  let parsed;
+  try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')); } catch { return 'unknown'; }
+  if (parsed && parsed.iv && parsed.tag && parsed.data && parsed.v !== BLOB_VERSION) return 'old-master';
+  if (parsed && Array.isArray(parsed.docs)) return 'plaintext';
+  return 'unknown';
+}
+
+/** 登录成功后调用：用密码把数据加载进内存。新格式直接解密；旧格式/空库则迁移或 seed。 */
+async function ensureStoreLoaded(password) {
+  if (storeLoaded) return;
+  await ensureDir(DATA_DIR);
+  const raw = await readLedgerRaw();
+  const fmt = ledgerFormat(raw);
+
+  if (fmt === 'new') {
+    const blob = parseBlob(raw);
+    let key;
+    try { key = deriveKey(password, Buffer.from(blob.salt, 'hex'), blob.params); } catch { throw new Error('密钥派生失败'); }
+    const dec = decryptBlobWith(raw, key);
+    if (!dec || dec.__decryptError) throw new Error('数据解密失败：密码不匹配');
+    if (!Array.isArray(dec.docs)) throw new Error('数据文件格式损坏');
+    db = dec;
+    currentKey = key;
+    currentSalt = Buffer.from(blob.salt, 'hex');
+    currentPassword = password;
+    storeLoaded = true;
+    // 若 auth 仍是旧哈希格式，顺手迁到哨兵格式（与 ledger 同 salt/key）
+    const loadedAuth = await loadAuth();
+    if (loadedAuth && loadedAuth.format !== 'new') {
+      await writeAuthVerifier(currentKey, currentSalt);
+    }
+    return;
   }
+
+  // 迁移 / 首次 seed
+  let migrated = false;
+  if (fmt === 'old-master') {
+    const dec = await decryptLegacyMaster(raw);
+    if (dec && Array.isArray(dec.docs)) { db = dec; migrated = true; }
+    else throw new Error('旧数据无法用 master.key 解密（master.key 可能丢失或不匹配）');
+  } else if (fmt === 'plaintext') {
+    db = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    migrated = true;
+  } else {
+    db = { docs: [] };
+    seed();
+    migrated = true;
+  }
+
+  const newSalt = randomBytes(16);
+  const newKey = deriveKey(password, newSalt);
+  currentKey = newKey;
+  currentSalt = newSalt;
+  currentPassword = password;
+  storeLoaded = true;
+  await persist(); // 用新密钥重新加密落盘
+  await writeAuthVerifier(newKey, newSalt);
+  // 迁移成功后删除 master.key，数据自此仅与登录密码绑定
+  try { await unlink(KEY_FILE); } catch { /* 不存在则忽略 */ }
+  if (migrated && fmt !== 'empty') {
+    try { await audit('migrate', { from: fmt }, null); } catch { /* ignore */ }
+    console.log('[my-jizhang] 数据已迁移到「密码自加密」模式，master.key 已删除。请牢记登录密码——它是唯一解密凭证。');
+  } else if (fmt === 'empty') {
+    console.log('[my-jizhang] 首次使用已初始化示例数据。请牢记登录密码——它是唯一解密凭证。');
+  }
+  // 加载/迁移完成后做一次启动备份
+  try { await createBackup(); } catch (e) { console.error('[my-jizhang] 启动备份失败：', e.message); }
 }
 
 function persist() {
-  const snapshot = encryptJson(db);
+  if (!currentKey) return persistChain; // 数据未加载（未登录），忽略写入
+  const snapshot = encryptBlob(db, currentKey, currentSalt);
   persistChain = persistChain
     .then(async () => {
       const tmp = `${DATA_FILE}.tmp`;
@@ -379,6 +477,10 @@ function sendRedirect(res, location) {
 }
 
 async function readBody(req, limit = BODY_LIMIT) {
+  return JSON.parse(await readBodyText(req, limit));
+}
+
+async function readBodyText(req, limit = BODY_LIMIT) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -386,8 +488,8 @@ async function readBody(req, limit = BODY_LIMIT) {
     if (size > limit) throw new Error('请求内容过大');
     chunks.push(chunk);
   }
-  if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (chunks.length === 0) return '';
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function sameOrigin(req) {
@@ -414,41 +516,71 @@ function cookieHeader(token, maxAge) {
   return parts.join('; ');
 }
 
+/** 在服务端构建导入树（与前端 doImport 逻辑一致）。返回导入数量。 */
+function importDocsIntoDb(docs) {
+  const valid = (docs || []).filter((d) => d && d.id && d.name);
+  if (!valid.length) throw new Error('文件中没有可导入的文档');
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  const rootName = `导入-${stamp}`;
+  const rootId = randomUUID();
+  const iso = now.toISOString();
+  const topFolder = db.docs.find((d) => !d.parent_id && d.kind === 'folder');
+  db.docs.push({
+    id: rootId, parent_id: topFolder ? topFolder.id : null, name: rootName,
+    kind: 'folder', content: '', sort: 0, created_at: iso, updated_at: iso,
+  });
+  const depthOf = (id) => {
+    let depth = 0;
+    let cur = id;
+    const seen = new Set();
+    while (cur) {
+      const doc = valid.find((x) => x.id === cur);
+      if (!doc || seen.has(cur)) break;
+      seen.add(cur);
+      cur = doc.parent_id;
+      depth += 1;
+    }
+    return depth;
+  };
+  valid.sort((a, b) => depthOf(a.id) - depthOf(b.id));
+  const idMap = {};
+  for (const d of valid) {
+    const newId = randomUUID();
+    idMap[d.id] = newId;
+    const parent = d.parent_id ? (idMap[d.parent_id] || rootId) : rootId;
+    db.docs.push({
+      id: newId, parent_id: parent, name: String(d.name),
+      kind: d.kind === 'folder' ? 'folder' : 'doc',
+      content: typeof d.content === 'string' ? d.content : '',
+      sort: typeof d.sort === 'number' ? d.sort : 0,
+      created_at: d.created_at || iso, updated_at: d.updated_at || iso,
+    });
+  }
+  return valid.length;
+}
+
 /* ---------------- 启动前初始化 ---------------- */
 
 async function boot() {
   await ensureDir(DATA_DIR);
-  await loadKey();
-  await initStore();
 
-  // 认证：首次运行设初始密码
-  let auth = await loadAuth();
+  // 若指定了 INIT_PASSWORD 且尚未设置密码，预写 auth（数据仍惰性加载，首次登录时 seed）
+  const auth = await loadAuth();
   const initPw = process.env.INIT_PASSWORD;
-  if (!auth) {
-    const pw = initPw && initPw.trim() ? initPw.trim() : randomPassword();
-    await writeAuth(pw);
-    if (!initPw) {
-      console.log('======================================================');
-      console.log('[my-jizhang] 首次启动，已生成初始登录密码：' + pw);
-      console.log('[my-jizhang] 请登录后在「设置」中立即修改密码。');
-      console.log('[my-jizhang] 可用环境变量 INIT_PASSWORD 指定初始密码。');
-      console.log('======================================================');
-    } else {
-      console.log('[my-jizhang] 已使用 INIT_PASSWORD 设置登录密码。');
-    }
-  } else if (initPw && initPw.trim()) {
-    // 显式指定则覆盖（便于忘记密码时重置）
-    await writeAuth(initPw.trim());
-    console.log('[my-jizhang] 已用 INIT_PASSWORD 重置登录密码。');
+  if (!auth && initPw && initPw.trim()) {
+    const pw = initPw.trim();
+    const salt = randomBytes(16);
+    await writeAuthVerifier(deriveKey(pw, salt), salt);
+    console.log('[my-jizhang] 已使用 INIT_PASSWORD 设置登录密码（首次登录时初始化数据）。');
+  } else if (!auth) {
+    console.log('[my-jizhang] 尚未设置登录密码，请打开登录页设置初始密码（或用环境变量 INIT_PASSWORD 指定）。');
   }
 
-  // 立即做一次备份并启动定时备份
-  try {
-    const n = await createBackup();
-    console.log('[my-jizhang] 启动备份已创建：' + n);
-  } catch (e) { console.error('[my-jizhang] 启动备份失败：', e.message); }
   setInterval(() => {
-    createBackup().then((n) => audit('backup.auto', { name: n })).catch((e) => console.error('[my-jizhang] 自动备份失败：', e.message));
+    if (!currentKey) return;
+    createBackup().then((n) => n && audit('backup.auto', { name: n })).catch((e) => console.error('[my-jizhang] 自动备份失败：', e.message));
   }, BACKUP_INTERVAL);
 }
 
@@ -462,19 +594,46 @@ async function handleAuth(req, res, pathname) {
     const auth = await loadAuth();
     return sendJson(res, 200, { ok: true, authenticated: !!getSession(req), needsSetup: !auth });
   }
+  if (pathname === '/api/setup' && req.method === 'POST') {
+    if (!sameOrigin(req)) return sendJson(res, 403, { error: '非法来源' });
+    if (await loadAuth()) return sendJson(res, 400, { error: '已设置过密码，请直接登录' });
+    let body;
+    try { body = await readBody(req); } catch { return sendJson(res, 400, { error: '请求无效' }); }
+    const pw = String(body.password || '');
+    if (pw.length < 6) return sendJson(res, 400, { error: '密码至少 6 位' });
+    const salt = randomBytes(16);
+    const key = deriveKey(pw, salt);
+    await writeAuthVerifier(key, salt);
+    currentKey = null; currentSalt = null; currentPassword = null; storeLoaded = false;
+    try {
+      await ensureStoreLoaded(pw); // 首次 seed + 加密落盘
+    } catch (e) {
+      return sendJson(res, 500, { error: '初始化数据失败：' + e.message });
+    }
+    const token = createSession();
+    res.setHeader('set-cookie', cookieHeader(token, SESSION_TTL));
+    await audit('setup', null, req);
+    return sendJson(res, 200, { ok: true });
+  }
   if (pathname === '/api/login' && req.method === 'POST') {
     if (!sameOrigin(req)) return sendJson(res, 403, { error: '非法来源' });
     const ip = clientIp(req);
     const fail = loginFails.get(ip);
     if (fail && fail.until > Date.now()) {
-      await audit('login.fail', { reason: 'locked', ip }, req);
+      await audit('login.fail', { reason: 'locked' }, req);
       return sendJson(res, 429, { error: '尝试过于频繁，请稍后再试' });
     }
     let body;
     try { body = await readBody(req); } catch { return sendJson(res, 400, { error: '请求无效' }); }
-    const auth = await loadAuth();
-    const ok = !!auth && verifyPassword(body.password, auth);
+    const loaded = await loadAuth();
+    const ok = !!loaded && verifyAuth(body.password, loaded);
     if (ok) {
+      try {
+        await ensureStoreLoaded(body.password);
+      } catch (e) {
+        await audit('login.fail', { reason: 'load_error', error: e.message }, req);
+        return sendJson(res, 400, { error: e.message || '数据加载失败' });
+      }
       loginFails.delete(ip);
       const token = createSession();
       res.setHeader('set-cookie', cookieHeader(token, SESSION_TTL));
@@ -498,18 +657,24 @@ async function handleAuth(req, res, pathname) {
     if (!getSession(req)) return sendJson(res, 401, { error: '未登录' });
     let body;
     try { body = await readBody(req); } catch { return sendJson(res, 400, { error: '请求无效' }); }
-    const auth = await loadAuth();
-    if (!auth || !verifyPassword(body.old, auth)) {
+    const loaded = await loadAuth();
+    if (!loaded || !verifyAuth(body.old, loaded)) {
       await audit('password.change', { ok: false, reason: 'old_mismatch' }, req);
       return sendJson(res, 400, { error: '旧密码不正确' });
     }
     const np = String(body.new || '');
-    if (np.length < 6) {
-      return sendJson(res, 400, { error: '新密码至少 6 位' });
-    }
-    await writeAuth(np);
+    if (np.length < 6) return sendJson(res, 400, { error: '新密码至少 6 位' });
+    if (np === String(body.old || '')) return sendJson(res, 400, { error: '新密码不能与旧密码相同' });
+    // 用新密码重新派生密钥，重新加密数据文件 + 重写 auth 哨兵
+    const newSalt = randomBytes(16);
+    const newKey = deriveKey(np, newSalt);
+    currentKey = newKey;
+    currentSalt = newSalt;
+    currentPassword = np;
+    await persist(); // 用新密钥重写 ledger.json
+    await writeAuthVerifier(newKey, newSalt);
     const token = getSession(req);
-    invalidateOtherSessions(token); // 其它设备重新登录
+    invalidateOtherSessions(token); // 其它设备需用新密码重新登录
     await audit('password.change', { ok: true }, req);
     return sendJson(res, 200, { ok: true });
   }
@@ -592,7 +757,7 @@ async function handleDocs(req, res, pathname) {
 }
 
 async function handleExtra(req, res, pathname) {
-  // 导出：?id=xxx 导出该节点子树；不带 id 导出全部
+  // 导出：?id=xxx 导出该节点子树；不带 id 导出全部。输出加密包。
   if (pathname === '/api/export' && req.method === 'GET') {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const rootId = url.searchParams.get('id');
@@ -602,26 +767,57 @@ async function handleExtra(req, res, pathname) {
       ids = collectIds(rootId);
     }
     const docs = ids ? db.docs.filter((d) => ids.includes(d.id)) : db.docs;
+    const payload = {
+      app: 'my-jizhang',
+      version: BLOB_VERSION,
+      exported_at: new Date().toISOString(),
+      docs,
+    };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const blob = encryptBlob(payload, currentKey, currentSalt);
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
       'content-disposition': `attachment; filename="my-jizhang-export-${stamp}.json"`,
     });
-    // 流式写出，避免大图把整个 JSON 一次性读进内存
-    res.write('{"app":"my-jizhang","version":1,"exported_at":"' + new Date().toISOString() + '","docs":[');
-    for (let i = 0; i < docs.length; i += 1) {
-      if (i) res.write(',');
-      res.write(JSON.stringify(docs[i]));
-    }
-    res.write(']}');
-    res.end();
+    res.end(blob);
     await audit('export', { id: rootId || null, count: docs.length }, req);
     return true;
   }
 
+  // 导入：上传加密导出文件，服务端用当前登录密码解密后建目录树
+  if (pathname === '/api/import' && req.method === 'POST') {
+    let text;
+    try { text = await readBodyText(req); } catch { return sendJson(res, 400, { error: '读取文件失败' }); }
+    if (!currentPassword) return sendJson(res, 401, { error: '未登录' });
+    let parsed = null;
+    const dec = decryptBlob(text, currentPassword);
+    if (dec && !dec.__decryptError) {
+      parsed = dec;
+    } else {
+      // 兼容旧版明文导出（{docs:[...]}），无加密
+      try {
+        const obj = JSON.parse(text);
+        if (obj && Array.isArray(obj.docs)) parsed = obj;
+      } catch { /* ignore */ }
+    }
+    if (!parsed || !Array.isArray(parsed.docs)) {
+      return sendJson(res, 400, { error: '无法解密：该文件可能由不同密码加密，或文件已损坏' });
+    }
+    let count = 0;
+    try {
+      count = importDocsIntoDb(parsed.docs);
+    } catch (e) {
+      return sendJson(res, 400, { error: e.message });
+    }
+    await persist();
+    await audit('import', { count }, req);
+    return sendJson(res, 200, { ok: true, count });
+  }
+
   if (pathname === '/api/backup' && req.method === 'POST') {
     const name = await createBackup();
+    if (!name) return sendJson(res, 503, { error: '数据尚未加载' });
     await audit('backup.manual', { name }, req);
     return sendJson(res, 200, { ok: true, name });
   }
@@ -722,4 +918,5 @@ await boot();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[my-jizhang] 已启动：http://0.0.0.0:${PORT}  数据目录：${DATA_DIR}`);
+  console.log('[my-jizhang] 加密模式：密码自加密（无 master.key）。登录密码是唯一解密凭证，请妥善保管。');
 });

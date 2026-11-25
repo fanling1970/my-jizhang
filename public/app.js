@@ -16,6 +16,7 @@
     saveStatus: $('#save-status'),
     formatBar: $('#format-bar'),
     fontSize: $('#font-size'),
+    fontColor: $('#font-color'),
     fileInput: $('#file-input'),
     ctxMenu: $('#ctx-menu'),
     sidebar: $('#sidebar'),
@@ -782,6 +783,7 @@
       '<button class="lg-add" data-type="income" type="button">＋ 收入</button>' +
       '<button class="lg-add" data-type="expense" type="button">－ 支出</button>' +
       '<button class="lg-add" data-act="voucher" type="button">＋ 凭证</button>' +
+      '<button class="lg-set" data-act="settings" type="button" title="表格设置（字号/加粗/颜色/背景/边框/行高）">⚙</button>' +
       '</div>';
     wrap.querySelector('tbody').appendChild(createLedgerRow(type));
     return wrap;
@@ -824,8 +826,192 @@
       b.className = 'lg-add'; b.dataset.act = 'voucher'; b.type = 'button'; b.textContent = '＋ 凭证';
       bar.appendChild(b);
     }
+    if (bar && !bar.querySelector('[data-act="settings"]')) {
+      const s = document.createElement('button');
+      s.className = 'lg-set'; s.dataset.act = 'settings'; s.type = 'button';
+      s.title = '表格设置（字号/加粗/颜色/背景/边框/行高）'; s.textContent = '⚙';
+      bar.appendChild(s);
+    }
+    applyTableSettings(ledger);
   }
   function normalizeLedgers() { $$('.ledger', el.docBody).forEach(normalizeLedger); }
+
+  /* ---------------- 表格设置（每张表独立，持久化到 data-* + 内联 CSS 变量） ---------------- */
+
+  const TBL_DEFAULTS = { fs: '13', bold: '', color: '#24292f', bg: '', border: '#e5e6e8', rowh: '32' };
+
+  /** 把 .ledger 上 data-tbl-* 设置应用为内联 CSS 变量，渲染/刷新后由 normalizeLedger 重新应用 */
+  function applyTableSettings(ledger) {
+    if (!ledger) return;
+    const d = ledger.dataset;
+    ledger.style.setProperty('--lg-fs', (d.tblFs || TBL_DEFAULTS.fs) + 'px');
+    ledger.style.setProperty('--lg-bold', d.tblBold === '1' ? 'bold' : 'normal');
+    ledger.style.setProperty('--lg-color', d.tblColor || TBL_DEFAULTS.color);
+    ledger.style.setProperty('--lg-bg', d.tblBg || 'transparent');
+    ledger.style.setProperty('--lg-border', d.tblBorder || TBL_DEFAULTS.border);
+    ledger.style.setProperty('--lg-rowh', (d.tblRowh || TBL_DEFAULTS.rowh) + 'px');
+  }
+
+  function setTableSetting(ledger, key, value) {
+    if (!ledger) return;
+    const attr = 'tbl' + key.charAt(0).toUpperCase() + key.slice(1); // tblFs / tblBold ...
+    if (value === '' || value === null || value === undefined) delete ledger.dataset[attr];
+    else ledger.dataset[attr] = String(value);
+    applyTableSettings(ledger);
+    markDirty(); commitHistory(true);
+  }
+
+  /* 表格设置浮层（全局共享一个） */
+  let tblPanel = null;
+  let tblPanelTarget = null;
+
+  function ensureTblPanel() {
+    if (tblPanel) return tblPanel;
+    tblPanel = document.createElement('div');
+    tblPanel.className = 'tbl-settings';
+    tblPanel.hidden = true;
+    tblPanel.innerHTML =
+      '<div class="ts-title">表格设置</div>' +
+      '<div class="ts-row"><label>字号</label><input type="number" class="ts-fs" min="10" max="48" step="1"><span class="ts-unit">px</span></div>' +
+      '<div class="ts-row"><label>加粗</label><input type="checkbox" class="ts-bold"></div>' +
+      '<div class="ts-row"><label>字体颜色</label><input type="color" class="ts-color"></div>' +
+      '<div class="ts-row"><label>表格背景</label><input type="color" class="ts-bg"><button type="button" class="ts-clear" data-k="bg">清除</button></div>' +
+      '<div class="ts-row"><label>边框颜色</label><input type="color" class="ts-border"></div>' +
+      '<div class="ts-row"><label>行高</label><input type="number" class="ts-rowh" min="20" max="160" step="1"><span class="ts-unit">px</span></div>' +
+      '<div class="ts-actions"><button type="button" class="ts-reset">恢复默认</button></div>';
+    document.body.appendChild(tblPanel);
+
+    const bind = (sel, evt, fn) => {
+      const el2 = tblPanel.querySelector(sel);
+      if (el2) el2.addEventListener(evt, fn);
+    };
+    bind('.ts-fs', 'input', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'fs', tblPanel.querySelector('.ts-fs').value); });
+    bind('.ts-bold', 'change', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'bold', tblPanel.querySelector('.ts-bold').checked ? '1' : ''); });
+    bind('.ts-color', 'input', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'color', tblPanel.querySelector('.ts-color').value); });
+    bind('.ts-bg', 'input', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'bg', tblPanel.querySelector('.ts-bg').value); });
+    bind('.ts-border', 'input', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'border', tblPanel.querySelector('.ts-border').value); });
+    bind('.ts-rowh', 'input', () => { if (tblPanelTarget) setTableSetting(tblPanelTarget, 'rowh', tblPanel.querySelector('.ts-rowh').value); });
+    tblPanel.querySelector('.ts-clear').addEventListener('click', () => {
+      if (!tblPanelTarget) return;
+      setTableSetting(tblPanelTarget, 'bg', '');
+      openTblPanel(tblPanelTarget, tblPanel._anchor); // 刷新颜色框显示
+    });
+    bind('.ts-reset', 'click', () => {
+      if (!tblPanelTarget) return;
+      ['fs', 'bold', 'color', 'bg', 'border', 'rowh'].forEach((k) => {
+        const attr = 'tbl' + k.charAt(0).toUpperCase() + k.slice(1);
+        delete tblPanelTarget.dataset[attr];
+      });
+      applyTableSettings(tblPanelTarget);
+      markDirty(); commitHistory(true);
+      openTblPanel(tblPanelTarget, tblPanel._anchor);
+    });
+    // 点击浮层外关闭
+    setTimeout(() => {
+      document.addEventListener('mousedown', (e) => {
+        if (tblPanel.hidden) return;
+        if (tblPanel.contains(e.target)) return;
+        if (e.target.closest && e.target.closest('.lg-set')) return; // 点齿轮由其自己处理
+        closeTblPanel();
+      });
+    }, 0);
+    return tblPanel;
+  }
+
+  function fillTblPanel(ledger) {
+    if (!tblPanel || !ledger) return;
+    const d = ledger.dataset;
+    tblPanel.querySelector('.ts-fs').value = d.tblFs || TBL_DEFAULTS.fs;
+    tblPanel.querySelector('.ts-bold').checked = d.tblBold === '1';
+    tblPanel.querySelector('.ts-color').value = d.tblColor || TBL_DEFAULTS.color;
+    tblPanel.querySelector('.ts-bg').value = d.tblBg || '#ffffff';
+    tblPanel.querySelector('.ts-border').value = d.tblBorder || TBL_DEFAULTS.border;
+    tblPanel.querySelector('.ts-rowh').value = d.tblRowh || TBL_DEFAULTS.rowh;
+  }
+
+  function openTblPanel(ledger, anchor) {
+    const p = ensureTblPanel();
+    tblPanelTarget = ledger;
+    p._anchor = anchor;
+    fillTblPanel(ledger);
+    p.hidden = false;
+    const r = anchor.getBoundingClientRect();
+    const top = window.scrollY + r.bottom + 4;
+    let left = window.scrollX + r.left;
+    const pw = 230;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+    p.style.top = top + 'px';
+    p.style.left = Math.max(8, left) + 'px';
+  }
+  function closeTblPanel() { if (tblPanel) tblPanel.hidden = true; tblPanelTarget = null; }
+
+  /* ---------------- 单元格内容格式化（作用于当前聚焦的表格输入框） ---------------- */
+
+  function focusedTableInput() {
+    const ctx = getActiveContext();
+    return ctx && ctx.kind === 'input' ? ctx.input : null;
+  }
+
+  /** 工具栏命令作用到表格输入框（整单元格）；返回是否已处理 */
+  function applyCmdToTableInput(cmd) {
+    const input = focusedTableInput();
+    if (!input) return false;
+    if (cmd === 'bold') input.style.fontWeight = input.style.fontWeight === 'bold' ? '' : 'bold';
+    else if (cmd === 'italic') input.style.fontStyle = input.style.fontStyle === 'italic' ? '' : 'italic';
+    else if (cmd === 'underline') input.style.textDecoration = input.style.textDecoration === 'underline' ? '' : 'underline';
+    else return false;
+    autoGrowRow(input);
+    markDirty(); commitHistory(true);
+    syncToolbarToInput(input);
+    input.focus();
+    return true;
+  }
+
+  function applyFontSizeToInput(px) {
+    const input = focusedTableInput();
+    if (!input) return false;
+    input.style.fontSize = px + 'px';
+    autoGrowRow(input);
+    markDirty(); commitHistory(true);
+    input.focus();
+    return true;
+  }
+
+  function applyColorToInput(color) {
+    const input = focusedTableInput();
+    if (!input) return false;
+    input.style.color = color;
+    markDirty(); commitHistory(true);
+    input.focus();
+    return true;
+  }
+
+  /** 行高随字号自动加大：由 CSS 驱动（input height:auto，td height 作为最小值，
+   *  字号变大输入框变高 → 行撑高；字号调回 → 行回缩）。此处保留钩子便于扩展。 */
+  function autoGrowRow(input) {
+    void input;
+  }
+
+  /** 聚焦表格输入框时，把工具栏状态同步为该框的样式 */
+  function syncToolbarToInput(input) {
+    if (!input) return;
+    const cs = window.getComputedStyle(input);
+    const boldBtn = el.formatBar.querySelector('[data-cmd="bold"]');
+    const italBtn = el.formatBar.querySelector('[data-cmd="italic"]');
+    const undBtn = el.formatBar.querySelector('[data-cmd="underline"]');
+    if (boldBtn) boldBtn.classList.toggle('active', (cs.fontWeight || '').startsWith('7') || cs.fontWeight === 'bold');
+    if (italBtn) italBtn.classList.toggle('active', cs.fontStyle === 'italic');
+    if (undBtn) undBtn.classList.toggle('active', (cs.textDecorationLine || cs.textDecoration || '').includes('underline'));
+    const fs = parseInt(cs.fontSize, 10);
+    if (el.fontSize) el.fontSize.value = (fs && fs >= 10) ? String(fs) : '';
+    if (el.fontColor) {
+      const m = (cs.color || '').match(/\d+/g);
+      if (m && m.length >= 3) {
+        const hex = '#' + [m[0], m[1], m[2]].map((n) => Number(n).toString(16).padStart(2, '0')).join('');
+        el.fontColor.value = hex;
+      }
+    }
+  }
 
   function findLedgerAtCaret() {
     const range = getActiveRange();
@@ -1240,6 +1426,8 @@
   /* ---------------- 富文本 ---------------- */
 
   function applyFontSize(px) {
+    // 光标在表格输入框里 → 作用于该单元格（行高随字号自动加大）
+    if (applyFontSizeToInput(px)) return;
     const sel = window.getSelection();
     if (!sel || !sel.rangeCount) return;
     if (sel.isCollapsed) {
@@ -1261,6 +1449,8 @@
   }
 
   function updateFormatState() {
+    // 聚焦在表格输入框时，工具栏状态由 syncToolbarToInput 维护，避免被 contenteditable 的查询覆盖
+    if (focusedTableInput()) return;
     try {
       ['bold', 'italic', 'underline'].forEach((cmd) => {
         const btn = el.formatBar.querySelector(`[data-cmd="${cmd}"]`);
@@ -1345,50 +1535,19 @@
     setStatus('导入中…');
     let text;
     try { text = await file.text(); } catch { setStatus('读取文件失败'); return; }
-    let data;
-    try { data = JSON.parse(text); } catch { setStatus('导入失败：不是有效的 JSON 文件'); return; }
-    if (!data || !Array.isArray(data.docs)) { setStatus('导入失败：文件格式不正确'); return; }
-    const src = data.docs.filter((d) => d && d.id && d.name);
-    const srcIds = new Set(src.map((d) => d.id));
-    const rootFolder = state.docs.find((d) => !d.parent_id && d.kind === 'folder');
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-    let importRoot;
+    // 加密文件交给服务端用当前登录密码解密；客户端没有密钥，无法本地解密
     try {
-      const created = await api('/api/docs', {
+      const r = await api('/api/import', {
         method: 'POST',
-        body: { name: `导入-${stamp}`, kind: 'folder', parent_id: rootFolder ? rootFolder.id : null },
+        headers: { 'content-type': 'application/json' },
+        body: text,
       });
-      importRoot = created.id;
-    } catch (e) { setStatus('创建导入目录失败：' + e.message); return; }
-    const map = {};
-    const depthOf = (id, seen) => {
-      if (seen.has(id)) return 0;
-      seen.add(id);
-      const d = src.find((x) => x.id === id);
-      if (!d || !d.parent_id || !srcIds.has(d.parent_id)) return 0;
-      return depthOf(d.parent_id, seen) + 1;
-    };
-    const ordered = src.slice().sort((a, b) => depthOf(a.id, new Set()) - depthOf(b.id, new Set()));
-    let okCount = 0;
-    for (const d of ordered) {
-      const newParent = (d.parent_id && map[d.parent_id]) ? map[d.parent_id] : importRoot;
-      try {
-        const r = await api('/api/docs', {
-          method: 'POST',
-          body: {
-            name: d.name,
-            kind: d.kind === 'folder' ? 'folder' : 'doc',
-            content: typeof d.content === 'string' ? d.content : '',
-            parent_id: newParent,
-          },
-        });
-        map[d.id] = r.id;
-        okCount += 1;
-      } catch { /* 跳过失败项 */ }
+      await loadDocs();
+      renderTree();
+      setStatus(`导入完成：共 ${r.count || 0} 项`);
+    } catch (e) {
+      setStatus('导入失败：' + (e.message || '密码不匹配或文件已损坏'));
     }
-    await loadDocs();
-    renderTree();
-    setStatus(`导入完成：共 ${okCount} 项`);
   }
 
   /** 表格右边缘拖拽调宽：只改 .ledger 宽度，内容列自动吸收，固定列不变 */
@@ -1443,8 +1602,8 @@
     // 记录最后聚焦的表格原生输入框（用于凭证行 / 按组插入的光标判定）。
     // 切回正文编辑区（contenteditable）时才清除；点按钮等非编辑控件时保留。
     el.docBody.addEventListener('focusin', (e) => {
-      if (isTableInput(e.target)) lastTableInput = e.target;
-      else if (e.target && e.target.isContentEditable) lastTableInput = null;
+      if (isTableInput(e.target)) { lastTableInput = e.target; syncToolbarToInput(e.target); }
+      else if (e.target && e.target.isContentEditable) { lastTableInput = null; updateFormatState(); }
     });
 
     /* 侧边栏头部按钮 */
@@ -1627,6 +1786,18 @@
         return;
       }
 
+      /* 表格设置齿轮 */
+      const setBtn = event.target.closest ? event.target.closest('.lg-set') : null;
+      if (setBtn) {
+        const ledger = setBtn.closest('.ledger');
+        if (ledger) {
+          event.preventDefault();
+          if (tblPanel && !tblPanel.hidden && tblPanelTarget === ledger) closeTblPanel();
+          else openTblPanel(ledger, setBtn);
+        }
+        return;
+      }
+
       /* 收支表格：加一行 / 删一行 / 加凭证 */
       const addBtn = event.target.closest ? event.target.closest('.lg-add') : null;
       if (addBtn) {
@@ -1705,6 +1876,8 @@
         const cmd = btn.dataset.cmd;
         if (cmd === 'undo') { undoDoc(); return; }
         if (cmd === 'redo') { redoDoc(); return; }
+        // 光标在表格输入框里 → B/I/U 作用于该单元格
+        if ((cmd === 'bold' || cmd === 'italic' || cmd === 'underline') && applyCmdToTableInput(cmd)) return;
         el.docBody.focus();
         restoreSelection();
         document.execCommand(cmd, false, null);
@@ -1722,6 +1895,18 @@
       restoreSelection();
       applyFontSize(px);
       markDirty(); el.fontSize.value = '';
+    });
+
+    el.fontColor.addEventListener('input', () => {
+      if (!state.activeId) return;
+      const color = el.fontColor.value;
+      if (!color) return;
+      // 表格输入框 → 单元格改色；否则作用于正文选区
+      if (applyColorToInput(color)) { markDirty(); return; }
+      restoreSelection();
+      el.docBody.focus();
+      document.execCommand('foreColor', false, color);
+      markDirty(); updateFormatState();
     });
 
     $('#btn-image').addEventListener('click', () => {
