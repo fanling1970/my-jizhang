@@ -173,8 +173,10 @@
     state.dirty = false; setStatus('');
     hideImgCtxMenu();
     renderBreadcrumb(doc);
+    normalizeImgs();
     recalcTotals();
     el.docScroll.scrollTop = 0;
+    resetHistory();
   }
 
   function renderBreadcrumb(doc) {
@@ -452,6 +454,67 @@
     clearTimeout(state.saveTimer);
     /* 打字即存：250ms 内的连续输入合并成一次请求 */
     state.saveTimer = setTimeout(() => saveNow(), 250);
+    scheduleHistory();
+  }
+
+  /* ---------------- 撤销 / 重做（双栈快照） ---------------- */
+
+  const hist = { undo: [], redo: [], last: '', timer: null, muted: false };
+
+  function resetHistory() {
+    clearTimeout(hist.timer);
+    hist.undo = [];
+    hist.redo = [];
+    hist.last = el.docBody.innerHTML;
+  }
+
+  function scheduleHistory() {
+    if (hist.muted) return;
+    clearTimeout(hist.timer);
+    hist.timer = setTimeout(() => commitHistory(true), 500);
+  }
+
+  function commitHistory(immediate) {
+    if (hist.muted) return;
+    const push = () => {
+      const html = el.docBody.innerHTML;
+      if (html === hist.last) return;
+      hist.undo.push(hist.last);
+      if (hist.undo.length > 80) hist.undo.shift();
+      hist.redo = [];
+      hist.last = html;
+    };
+    if (immediate) { clearTimeout(hist.timer); push(); }
+    else scheduleHistory();
+  }
+
+  function applyHistory(html) {
+    hist.muted = true;
+    const scroll = el.docScroll.scrollTop;
+    el.docBody.innerHTML = html;
+    hist.muted = false;
+    hist.last = html;
+    normalizeImgs();
+    recalcTotals();
+    state.dirty = true;
+    setStatus('未保存');
+    clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(() => saveNow(), 250);
+    el.docScroll.scrollTop = scroll;
+  }
+
+  function undoDoc() {
+    /* 先把当前状态补记下来，保证重做能回到这里 */
+    commitHistory(true);
+    if (!hist.undo.length) return;
+    hist.redo.push(hist.last);
+    applyHistory(hist.undo.pop());
+  }
+
+  function redoDoc() {
+    if (!hist.redo.length) return;
+    hist.undo.push(hist.last);
+    applyHistory(hist.redo.pop());
   }
 
   /** 把表格里的 select / input 的实时状态写回 HTML 属性，否则重载后会丢 */
@@ -466,10 +529,6 @@
         });
       }
       $$('input', row).forEach((inp) => inp.setAttribute('value', inp.value));
-    });
-    $$('.img-inline img', el.docBody).forEach((img) => {
-      const deg = Number(img.dataset.rotate || 0);
-      if (deg) img.style.transform = `rotate(${deg}deg)`;
     });
   }
 
@@ -673,7 +732,7 @@
   function appendLedgerRow(ledger, type) {
     const row = createLedgerRow(type);
     ledger.querySelector('tbody').appendChild(row);
-    recalcTotals(); markDirty();
+    recalcTotals(); markDirty(); commitHistory(true);
     const desc = row.querySelector('.lg-desc');
     if (desc) desc.focus();
     row.scrollIntoView({ block: 'nearest' });
@@ -683,16 +742,12 @@
   function insertMoney(type) {
     if (!state.activeId) return;
     restoreSelection();
-    /* 光标在表格里 → 加到那张表；否则优先加到文档里已有的最后一张表 */
-    let target = findLedgerAtCaret();
-    if (!target) {
-      const ledgers = $$('.ledger', el.docBody);
-      target = ledgers.length ? ledgers[ledgers.length - 1] : null;
-    }
+    /* 只有光标在表格内部时才往那张表加行；否则在光标行新建一张表 */
+    const target = findLedgerAtCaret();
     if (target) { appendLedgerRow(target, type); return; }
     const ledger = createLedger(type);
     insertBlockAtCaret(ledger);
-    recalcTotals(); markDirty();
+    recalcTotals(); markDirty(); commitHistory(true);
     const desc = ledger.querySelector('.lg-desc');
     if (desc) desc.focus();
   }
@@ -714,7 +769,7 @@
     restoreSelection();
     const b = createTotalBlock();
     insertBlockAtCaret(b);
-    recalcTotals(); markDirty();
+    recalcTotals(); markDirty(); commitHistory(true);
   }
 
   function moneyText(v) { return '¥' + v.toFixed(2); }
@@ -787,6 +842,10 @@
     img.alt = o.alt || '记账凭证';
     if (o.title) img.title = o.title;
     img.addEventListener('error', () => setStatus('图片加载失败'));
+    img.addEventListener('load', () => {
+      if (!img.isConnected) return;
+      if (img.dataset.w || img.dataset.rotate) applyImgGeometry(img);
+    });
     img.src = src;
 
     const dots = document.createElement('button');
@@ -801,6 +860,16 @@
     return line;
   }
 
+  /** 复制一行图片（保留宽度与旋转角度） */
+  function cloneImgLine(img) {
+    const line = createImgLine(img.src, { alt: img.alt, title: img.title });
+    const copy = line.querySelector('img.doc-img');
+    if (img.dataset.w) copy.dataset.w = img.dataset.w;
+    if (img.dataset.rotate) copy.dataset.rotate = img.dataset.rotate;
+    applyImgGeometry(copy);
+    return line;
+  }
+
   /** 插入一张图片（在光标所在行） */
   function insertImage(src, opts) {
     if (!state.activeId) return;
@@ -808,6 +877,7 @@
     const line = createImgLine(src, opts);
     insertBlockAtCaret(line);
     markDirty();
+    commitHistory(true);
     saveNow();
   }
 
@@ -823,36 +893,95 @@
       cursor = line;
     }
     markDirty();
+    commitHistory(true);
     saveNow();
   }
 
-  /* 浮动工具条 */
+  /* ---------------- 图片尺寸与旋转 ---------------- */
+
+  /** 期望显示宽度（px）：优先 data-w，其次自然宽度，兜底容器宽度 */
+  function imgWidthOf(img) {
+    const cw = el.docBody.clientWidth || 720;
+    let w = parseFloat(img.dataset.w);
+    if (!Number.isFinite(w) || w <= 0) w = Math.min(img.naturalWidth || cw, cw);
+    return w;
+  }
+
+  /**
+   * 按 data-w 和旋转角度重排图片。
+   * 旋转 90/270 时外层盒子换成“横躺”尺寸、图片绝对定位居中旋转，
+   * 这样旋转后不会溢出到编辑区外面，也不会把后面的内容挤乱。
+   */
+  function applyImgGeometry(img) {
+    if (!img) return;
+    const box = img.closest('.img-inline');
+    if (!box) return;
+    const w = imgWidthOf(img);
+    const nw = img.naturalWidth || w;
+    const nh = img.naturalHeight || w;
+    const h = Math.round(w * (nh / nw));
+    const deg = ((Number(img.dataset.rotate || 0) % 360) + 360) % 360;
+
+    img.style.width = Math.round(w) + 'px';
+    img.style.height = 'auto';
+    img.style.maxWidth = 'none';
+
+    if (deg === 90 || deg === 270) {
+      box.style.width = h + 'px';
+      box.style.height = Math.round(w) + 'px';
+      img.style.position = 'absolute';
+      img.style.left = '50%';
+      img.style.top = '50%';
+      img.style.transform = `translate(-50%, -50%) rotate(${deg}deg)`;
+    } else {
+      box.style.width = Math.round(w) + 'px';
+      box.style.height = 'auto';
+      img.style.position = '';
+      img.style.left = '';
+      img.style.top = '';
+      img.style.transform = deg === 180 ? 'rotate(180deg)' : '';
+    }
+  }
+
+  /** 统一入口：设置宽度后重排并记录 */
+  function setImgWidth(img, w) {
+    if (!img) return;
+    const cw = el.docBody.clientWidth || 720;
+    const px = Math.max(24, Math.min(Math.round(w), cw * 3));
+    img.dataset.w = String(px);
+    applyImgGeometry(img);
+    markDirty();
+    updateImgCtxSize();
+    commitHistory(true);
+  }
+
   function rotateImg(img, delta) {
     if (!img) return;
     const cur = Number(img.dataset.rotate || 0) + delta;
-    const next = ((cur % 360) + 360) % 360;
-    img.dataset.rotate = String(next);
-    img.style.transform = `rotate(${next}deg)`;
+    img.dataset.rotate = String(((cur % 360) + 360) % 360);
+    applyImgGeometry(img);
     markDirty();
+    updateImgCtxSize();
+    commitHistory(true);
+  }
+
+  function fitImgWidth(img) {
+    if (!img) return;
+    setImgWidth(img, el.docBody.clientWidth || 720);
   }
 
   function resetImg(img) {
     if (!img) return;
     const cw = el.docBody.clientWidth || 720;
-    img.style.width = Math.min(img.naturalWidth || cw, cw) + 'px';
-    img.style.height = '';
-    img.style.transform = '';
     img.dataset.rotate = '0';
-    markDirty();
-    updateImgCtxSize();
+    setImgWidth(img, Math.min(img.naturalWidth || cw, cw));
   }
 
-  function fitImgWidth(img) {
-    if (!img) return;
-    img.style.width = (el.docBody.clientWidth || 720) + 'px';
-    img.style.height = '';
-    markDirty();
-    updateImgCtxSize();
+  /** 重载文档后按 data-* 还原图片尺寸与旋转 */
+  function normalizeImgs() {
+    $$('.img-inline img.doc-img', el.docBody).forEach((img) => {
+      if (img.dataset.w || img.dataset.rotate) applyImgGeometry(img);
+    });
   }
 
   /* 图片菜单：由图片右上角三点弹出 */
@@ -884,49 +1013,36 @@
 
   function updateImgCtxSize() {
     if (!imgCtxTarget) return;
-    const rect = imgCtxTarget.getBoundingClientRect();
-    const containerWidth = el.docBody.clientWidth || 720;
-    const pct = Math.round((rect.width / containerWidth) * 100);
-    el.imgWidthPx.value = Math.round(rect.width);
+    const w = imgWidthOf(imgCtxTarget);
+    const nw = imgCtxTarget.naturalWidth || w;
+    const nh = imgCtxTarget.naturalHeight || w;
+    const h = w * (nh / nw);
+    const cw = el.docBody.clientWidth || 720;
+
+    const pct = Math.round((w / cw) * 100);
+    el.imgWidthPx.value = Math.round(w);
     el.imgWidthPct.value = Math.min(200, Math.max(10, pct));
     el.imgWidthPctLabel.textContent = pct + '%';
-    const naturalH = imgCtxTarget.naturalHeight || rect.height;
-    const naturalW = imgCtxTarget.naturalWidth || rect.width;
-    const hPct = Math.round((rect.height / naturalH) * 100);
-    el.imgHeightPx.value = Math.round(rect.height);
+
+    const hPct = Math.round((h / nh) * 100);
+    el.imgHeightPx.value = Math.round(h);
     el.imgHeightPct.value = Math.min(200, Math.max(10, hPct));
     el.imgHeightPctLabel.textContent = hPct + '%';
-    // 宽度百分比可能变化图片
-    if (naturalW && naturalH) {
-      const aspect = naturalW / naturalH;
-      const w = parseFloat(el.imgWidthPx.value) || rect.width;
-      el.imgHeightPx.value = Math.round(w / aspect);
-    }
   }
 
   function applyImgWidth(pctOrPx, unit) {
     if (!imgCtxTarget) return;
     const cw = el.docBody.clientWidth || 720;
-    let w;
-    if (unit === 'pct') w = cw * (pctOrPx / 100);
-    else w = pctOrPx;
-    w = Math.max(20, Math.min(w, cw * 3));
-    imgCtxTarget.style.width = Math.round(w) + 'px';
-    // 高保持等比
-    if (imgCtxTarget.naturalWidth && imgCtxTarget.naturalHeight) {
-      imgCtxTarget.style.height = '';
-    }
-    markDirty();
+    setImgWidth(imgCtxTarget, unit === 'pct' ? cw * (pctOrPx / 100) : pctOrPx);
   }
 
   function applyImgHeight(pctOrPx, unit) {
     if (!imgCtxTarget) return;
-    let h;
-    if (unit === 'pct') h = (imgCtxTarget.naturalHeight || 100) * (pctOrPx / 100);
-    else h = pctOrPx;
-    h = Math.max(20, Math.min(h, 1600));
-    imgCtxTarget.style.height = Math.round(h) + 'px';
-    markDirty();
+    const nw = imgCtxTarget.naturalWidth || 300;
+    const nh = imgCtxTarget.naturalHeight || 200;
+    /* 高度按百分比/像素设定后，换算成等比宽度，保证图片不变形 */
+    const h = unit === 'pct' ? nh * (pctOrPx / 100) : pctOrPx;
+    setImgWidth(imgCtxTarget, nw * (h / nh));
   }
 
   /* ---------------- 富文本 ---------------- */
@@ -1120,11 +1236,21 @@
       const row = sel.closest('.ledger-row');
       if (!row) return;
       row.dataset.type = sel.value;
-      recalcTotals(); markDirty();
+      recalcTotals(); markDirty(); commitHistory(true);
     });
 
     /* 正文点击 */
     el.docBody.addEventListener('click', (event) => {
+      /* 点在正文空白处：把光标放到最后一行，避免沿用上一次的位置 */
+      if (event.target === el.docBody) {
+        let last = el.docBody.lastElementChild;
+        if (!last || last.tagName !== 'P') {
+          last = document.createElement('p');
+          el.docBody.appendChild(last);
+        }
+        placeCaret(last, last.childNodes.length);
+        return;
+      }
       /* 图片右上角三点 → 弹出图片菜单 */
       const dots = event.target.closest ? event.target.closest('.img-dots') : null;
       if (dots) {
@@ -1155,7 +1281,7 @@
           ledger.replaceWith(p);
           placeCaret(p, 0);
         }
-        recalcTotals(); markDirty();
+        recalcTotals(); markDirty(); commitHistory(true);
         return;
       }
 
@@ -1203,8 +1329,12 @@
       btn.addEventListener('mousedown', (e) => e.preventDefault());
       btn.addEventListener('click', () => {
         if (!state.activeId) return;
+        const cmd = btn.dataset.cmd;
+        if (cmd === 'undo') { undoDoc(); return; }
+        if (cmd === 'redo') { redoDoc(); return; }
+        el.docBody.focus();
         restoreSelection();
-        document.execCommand(btn.dataset.cmd, false, null);
+        document.execCommand(cmd, false, null);
         markDirty(); updateFormatState();
       });
     });
@@ -1287,14 +1417,17 @@
         navigator.clipboard?.writeText(imgCtxTarget.src);
         setStatus('已复制图片地址');
       } else if (act === 'copy-img') {
-        if (line) line.after(createImgLine(imgCtxTarget.src, { alt: imgCtxTarget.alt, title: imgCtxTarget.title }));
+        if (line) line.after(cloneImgLine(imgCtxTarget));
       } else if (act === 'cut-img') {
-        if (line) line.replaceWith(createImgLine(imgCtxTarget.src, { alt: imgCtxTarget.alt, title: imgCtxTarget.title }));
+        if (line) line.replaceWith(cloneImgLine(imgCtxTarget));
       } else if (act === 'del-img') {
-        /* 只删当前这一张，不影响其它图片 */
-        if (line) line.remove(); else imgCtxTarget.remove();
+        /* 只删当前这一张：同一行里有其它图片时不受影响 */
+        const box = imgCtxTarget.closest('.img-inline');
+        const rowLine = imgCtxTarget.closest('.img-line');
+        if (box) box.remove(); else imgCtxTarget.remove();
+        if (rowLine && !rowLine.querySelector('.img-inline')) rowLine.remove();
         hideImgCtxMenu();
-        markDirty(); saveNow();
+        markDirty(); commitHistory(true); saveNow();
         return;
       } else if (act === 'rotl') {
         rotateImg(imgCtxTarget, -90);
@@ -1392,6 +1525,18 @@
 
     /* 滚动与窗口 */
     el.docScroll.addEventListener('scroll', hideImgCtxMenu);
+
+    /* 点在正文下方的空白区（doc-scroll 的留白）也把光标放到末尾 */
+    el.docScroll.addEventListener('click', (event) => {
+      if (event.target !== el.docScroll) return;
+      if (!state.activeId) return;
+      let last = el.docBody.lastElementChild;
+      if (!last || last.tagName !== 'P') {
+        last = document.createElement('p');
+        el.docBody.appendChild(last);
+      }
+      placeCaret(last, last.childNodes.length);
+    });
     window.addEventListener('resize', () => {
       if (imgCtxTarget) updateImgCtxSize();
     });
@@ -1403,8 +1548,21 @@
     });
 
     document.addEventListener('keydown', (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key.toLowerCase() === 's') {
         event.preventDefault(); flushSave();
+        return;
+      }
+      /* 编辑器内接管撤销 / 重做（原生撤销不认插入的表格和图片） */
+      if (mod && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redoDoc(); else undoDoc();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoDoc();
+        return;
       }
       if (event.key === 'Escape') {
         hideCtxMenu(); hideImgCtxMenu();
