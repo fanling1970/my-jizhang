@@ -598,7 +598,7 @@ button { cursor: pointer; }
   background: #fbfcfe; height: auto; padding: 0; vertical-align: top;
   border-bottom: 1px dashed var(--border);
 }
-.voucher-wrap { position: relative; padding: 6px 30px 6px 8px; min-height: 40px; }
+.voucher-wrap { position: relative; padding: 6px 36px 6px 8px; min-height: 40px; }
 .voucher-cell {
   min-height: 28px; outline: none;
   font-size: 13px; line-height: 1.5; color: var(--text);
@@ -608,9 +608,10 @@ button { cursor: pointer; }
 }
 .voucher-cell .img-line { margin: 4px 0; }
 .voucher-del {
-  position: absolute; top: 4px; right: 4px;
-  width: 20px; height: 20px; padding: 0; line-height: 1;
-  border: 0; border-radius: 3px; background: transparent;
+  position: absolute; top: 0; right: 0;
+  display: grid; place-items: center;
+  width: 32px; height: 32px; padding: 0; line-height: 1;
+  border: 0; border-radius: 0; background: transparent;
   color: #b9bec6; font-size: 12px; cursor: pointer; z-index: 2;
 }
 .voucher-del:hover { background: var(--expense-bg); color: var(--expense); }
@@ -828,15 +829,17 @@ button { cursor: pointer; }
   .ledger-table th { padding: 0 4px; font-size: 11px; }
   .ledger-table input, .ledger-table select { padding: 0 4px; font-size: 12px; }
   /* colgroup 上带了内联宽度，需要 !important 才能覆盖 */
-  .ledger-table col.col-date { width: 78px !important; }
-  .ledger-table col.col-type { width: 50px !important; }
+  .ledger-table col.col-date { width: 92px !important; }
+  .ledger-table col.col-type { width: 48px !important; }
   .ledger-table col.col-desc { width: auto !important; }
-  .ledger-table col.col-amount { width: 66px !important; }
+  .ledger-table col.col-amount { width: 64px !important; }
   .ledger-table col.col-op { width: 20px !important; }
-  .c-date { width: 78px; }
-  .c-type { width: 50px; }
-  .c-amount { width: 66px; }
+  .c-date { width: 92px; }
+  .c-type { width: 48px; }
+  .c-amount { width: 64px; }
   .c-op { width: 20px; }
+  /* 日期完整显示：缩小字号与内边距，避免被截断 */
+  .ledger-table input.lg-date { font-size: 11.5px; padding: 0 2px; }
   /* 隐藏日期 / 收支下拉箭头（点了照样弹出选择） */
   .ledger-table select.lg-type {
     -webkit-appearance: none; appearance: none;
@@ -847,6 +850,7 @@ button { cursor: pointer; }
   .ledger-table input[type="date"] { padding-right: 1px; }
   /* 手机端不需要拖拽调宽手柄 */
   .ledger-resize { display: none; }
-  /* 凭证行删除按钮加大点击区域 */
-  .voucher-del { width: 26px; height: 26px; font-size: 14px; }
+  /* 凭证行删除按钮：与收入行删除按钮同宽、垂直对齐 */
+  .voucher-del { width: 20px; height: 32px; }
+  .voucher-wrap { padding-right: 24px; }
 }

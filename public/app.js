@@ -1946,8 +1946,11 @@
       if (rowDel) {
         const row = rowDel.closest('.ledger-row');
         const ledger = row ? row.closest('.ledger') : null;
+        const isLastRow = !!(ledger && ledger.querySelectorAll('.ledger-row').length === 1);
+        /* 删掉最后一行会连带删除整张表格，需二次确认 */
+        if (isLastRow && !window.confirm('这是表格最后一行，删除后整张表格也会被删除，确定继续吗？')) return;
         if (row) row.remove();
-        if (ledger && !ledger.querySelector('.ledger-row')) {
+        if (isLastRow) {
           const p = document.createElement('p');
           ledger.replaceWith(p);
           placeCaret(p, 0);
