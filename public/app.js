@@ -610,18 +610,27 @@
     if (state.savePromise) return state.savePromise;
     const id = state.activeId;
     const content = serialize();
+    const mb = content.length / 1024 / 1024;
     state.dirty = false;
     setStatus('保存中…');
+    let blocked = false;
     state.savePromise = (async () => {
       try {
         await api(`/api/docs/${encodeURIComponent(id)}`, { method: 'PUT', body: { content } });
-        if (!state.dirty) setStatus('已保存');
-      } catch (e) { setStatus('保存失败'); state.dirty = true; }
-      finally { state.savePromise = null; }
+        if (!state.dirty) setStatus(mb > 15 ? `已保存（约 ${mb.toFixed(1)}MB）` : '已保存');
+      } catch (e) {
+        state.dirty = true;
+        if (e.status === 413) {
+          blocked = true;
+          setStatus(e.message || `文档过大（约 ${mb.toFixed(1)}MB），请删除或压缩部分图片`);
+        } else {
+          setStatus('保存失败');
+        }
+      } finally { state.savePromise = null; }
     })();
     await state.savePromise;
-    /* 保存过程中又有新的输入，再排一次 */
-    if (state.dirty) {
+    /* 保存过程中又有新的输入，再排一次；413 时不自动重试，避免持续刷屏 */
+    if (state.dirty && !blocked) {
       clearTimeout(state.saveTimer);
       state.saveTimer = setTimeout(() => saveNow(), 250);
     }
@@ -1287,6 +1296,51 @@
       r.onload = () => resolve(r.result); r.onerror = reject;
       r.readAsDataURL(file);
     });
+  }
+
+  /**
+   * 插入前压缩图片：手机原图动辄 3–6MB，base64 内嵌后多张即可撑爆 25MB 上限，
+   * 导致保存失败（413）与低端机内存崩溃。这里降采样到最长边 1600px、JPEG 0.72，
+   * 单图通常降到 100–300KB。GIF/SVG 或压缩后反而更大时回退原图。
+   */
+  function compressImageFile(file) {
+    return new Promise((resolve) => {
+      const type = (file.type || '').toLowerCase();
+      if (type === 'image/gif' || type === 'image/svg+xml') { resolve(null); return; }
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let w = img.naturalWidth || 0, h = img.naturalHeight || 0;
+        if (!w || !h) { resolve(null); return; }
+        const maxDim = 1600;
+        if (w > maxDim || h > maxDim) {
+          if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob((blob) => {
+          if (!blob || !blob.size || blob.size >= file.size) { resolve(null); return; }
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = () => resolve(null);
+          r.readAsDataURL(blob);
+        }, 'image/jpeg', 0.72);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
+  }
+
+  /** 优先压缩，失败则回退原图 data URL */
+  async function imageFileToSrc(file) {
+    const compressed = await compressImageFile(file);
+    if (compressed) return compressed;
+    return readFileAsDataUrl(file);
   }
 
   /** 生成一行图片：<p class="img-line"><span class="img-inline"><img><button class="img-dots">⋮</button></span></p> */
@@ -2007,7 +2061,7 @@
       const urls = [];
       for (const it of imageItems) {
         const file = it.getAsFile();
-        if (file) urls.push(await readFileAsDataUrl(file));
+        if (file) urls.push(await imageFileToSrc(file));
       }
       if (urls.length === 1) insertImage(urls[0]);
       else insertImages(urls);
@@ -2069,7 +2123,7 @@
       if (!imgs.length) { window.alert('请选择图片文件'); return; }
       if (imgs.length > 8) { window.alert('一次最多插入 8 张图片'); return; }
       const urls = [];
-      for (const f of imgs) urls.push(await readFileAsDataUrl(f));
+      for (const f of imgs) urls.push(await imageFileToSrc(f));
       if (urls.length === 1) insertImage(urls[0]);
       else insertImages(urls);
     });

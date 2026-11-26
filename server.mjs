@@ -48,7 +48,9 @@ const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 30));
 const AUDIT_MAX_BYTES = 5 * 1024 * 1024;
 const LOGIN_MAX_FAIL = Math.max(1, Number(process.env.LOGIN_MAX_FAIL || 8));
 const LOGIN_LOCK_MS = Math.max(1, Number(process.env.LOGIN_LOCK_MS || 5 * 60 * 1000));
-const BODY_LIMIT = 25 * 1024 * 1024;
+/* 请求体大小上限（MB）：0 或未设置 = 不限制。可用环境变量 BODY_LIMIT_MB 按需收紧。 */
+const BODY_LIMIT_MB = Number(process.env.BODY_LIMIT_MB || 0);
+const BODY_LIMIT = Number.isFinite(BODY_LIMIT_MB) && BODY_LIMIT_MB > 0 ? BODY_LIMIT_MB * 1024 * 1024 : 0;
 
 let db = { docs: [] };
 let persistChain = Promise.resolve();
@@ -485,7 +487,11 @@ async function readBodyText(req, limit = BODY_LIMIT) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) throw new Error('请求内容过大');
+    if (limit > 0 && size > limit) {
+      const err = new Error(`请求内容过大：${(size / 1024 / 1024).toFixed(1)}MB > 限制 ${(limit / 1024 / 1024).toFixed(0)}MB`);
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
     chunks.push(chunk);
   }
   if (chunks.length === 0) return '';
@@ -908,6 +914,11 @@ const server = createServer(async (req, res) => {
 
     await serveStatic(res, pathname, authed);
   } catch (err) {
+    if (err && err.code === 'PAYLOAD_TOO_LARGE') {
+      console.warn('[my-jizhang]', err.message, '|', req.method, req.url);
+      if (!res.headersSent) return sendJson(res, 413, { error: '文档过大（图片过多或过大），请删除或压缩部分图片后再保存' });
+      return res.end();
+    }
     console.error('[my-jizhang] 请求处理失败：', err);
     if (!res.headersSent) sendJson(res, 500, { error: '服务器内部错误' });
     else res.end();
@@ -918,5 +929,6 @@ await boot();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[my-jizhang] 已启动：http://0.0.0.0:${PORT}  数据目录：${DATA_DIR}`);
+  console.log(`[my-jizhang] 请求体上限：${BODY_LIMIT > 0 ? BODY_LIMIT_MB + 'MB（可用环境变量 BODY_LIMIT_MB 调整）' : '不限制（设 BODY_LIMIT_MB 可按需收紧）'}`);
   console.log('[my-jizhang] 加密模式：密码自加密（无 master.key）。登录密码是唯一解密凭证，请妥善保管。');
 });
