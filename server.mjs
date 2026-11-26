@@ -36,6 +36,7 @@ const KEY_FILE = path.resolve(process.env.KEY_FILE || path.join(DATA_DIR, 'maste
 const AUTH_FILE = path.resolve(process.env.AUTH_FILE || path.join(DATA_DIR, 'auth.json'));
 const AUDIT_FILE = path.resolve(process.env.AUDIT_FILE || path.join(DATA_DIR, 'audit.log'));
 const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups'));
+const ASSETS_DIR = path.resolve(process.env.ASSETS_DIR || path.join(DATA_DIR, 'assets'));
 const PORT = Number(process.env.PORT || 8080);
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
@@ -51,6 +52,11 @@ const LOGIN_LOCK_MS = Math.max(1, Number(process.env.LOGIN_LOCK_MS || 5 * 60 * 1
 /* 请求体大小上限（MB）：0 或未设置 = 不限制。可用环境变量 BODY_LIMIT_MB 按需收紧。 */
 const BODY_LIMIT_MB = Number(process.env.BODY_LIMIT_MB || 0);
 const BODY_LIMIT = Number.isFinite(BODY_LIMIT_MB) && BODY_LIMIT_MB > 0 ? BODY_LIMIT_MB * 1024 * 1024 : 0;
+/* 单张图片资产上限（MB）：默认 20MB，防止异常大图把磁盘/内存撑爆。 */
+const ASSET_LIMIT_MB = Number(process.env.ASSET_LIMIT_MB || 20);
+const ASSET_LIMIT = Number.isFinite(ASSET_LIMIT_MB) && ASSET_LIMIT_MB > 0 ? ASSET_LIMIT_MB * 1024 * 1024 : 20 * 1024 * 1024;
+const ASSET_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const ASSET_MAGIC = Buffer.from('MJA1');
 
 let db = { docs: [] };
 let persistChain = Promise.resolve();
@@ -179,6 +185,96 @@ async function decryptLegacyMaster(raw) {
     const plain = Buffer.concat([decipher.update(Buffer.from(p.data, 'hex')), decipher.final()]);
     return JSON.parse(plain.toString('utf8'));
   } catch { return null; }
+}
+
+/* ---------------- 图片资产（独立文件，按登录密钥加密） ---------------- */
+/*
+ * 文档正文只保留 /api/assets/<id> 引用，图片字节单独落盘，避免 base64 内嵌导致
+ * 文档体积与浏览器解码内存双双爆炸（手机渲染进程 OOM 的根因）。
+ * 文件格式：MJA1 | iv(12) | tag(16) | 密文，密文明文 = 头部长度(4,BE) + JSON 头 + 图片字节。
+ * 头部 JSON 目前只含 { mime }，因此文件自描述、导出/备份无需额外索引。
+ */
+
+function assetPath(id) {
+  if (typeof id !== 'string' || !ASSET_ID_RE.test(id)) return null;
+  const full = path.resolve(ASSETS_DIR, id);
+  if (full !== path.join(ASSETS_DIR, id)) return null; // 防路径穿越
+  return full;
+}
+
+function encryptAsset(bytes, mime, key) {
+  const head = Buffer.from(JSON.stringify({ mime: mime || 'application/octet-stream' }), 'utf8');
+  const headLen = Buffer.alloc(4);
+  headLen.writeUInt32BE(head.length, 0);
+  const plain = Buffer.concat([headLen, head, bytes]);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(plain), cipher.final()]);
+  return Buffer.concat([ASSET_MAGIC, iv, cipher.getAuthTag(), enc]);
+}
+
+/** 解密资产文件，返回 { mime, bytes }；格式不符/密钥不对返回 null。 */
+function decryptAsset(buf, key) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4 + 12 + 16 + 4) return null;
+  if (!buf.subarray(0, 4).equals(ASSET_MAGIC)) return null;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, buf.subarray(4, 16));
+    decipher.setAuthTag(buf.subarray(16, 32));
+    const plain = Buffer.concat([decipher.update(buf.subarray(32)), decipher.final()]);
+    const headLen = plain.readUInt32BE(0);
+    if (headLen > plain.length - 4) return null;
+    const head = JSON.parse(plain.subarray(4, 4 + headLen).toString('utf8'));
+    return { mime: head.mime || 'application/octet-stream', bytes: plain.subarray(4 + headLen) };
+  } catch {
+    return null;
+  }
+}
+
+async function writeAsset(id, bytes, mime, key) {
+  const full = assetPath(id);
+  if (!full) throw new Error('非法的图片 id');
+  await ensureDir(ASSETS_DIR);
+  const tmp = `${full}.tmp`;
+  await writeFile(tmp, encryptAsset(bytes, mime, key));
+  await rename(tmp, full);
+}
+
+async function readAsset(id, key) {
+  const full = assetPath(id);
+  if (!full) return null;
+  let buf;
+  try { buf = await readFile(full); } catch { return null; }
+  return decryptAsset(buf, key);
+}
+
+/** 收集文档里引用的资产 id（去重）。 */
+function collectAssetIds(docs) {
+  const ids = new Set();
+  const re = /\/api\/assets\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/g;
+  for (const doc of docs || []) {
+    if (!doc || typeof doc.content !== 'string') continue;
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(doc.content))) ids.add(m[1]);
+  }
+  return ids;
+}
+
+/** 改密时用新密钥重加密全部资产。先写临时文件再改名，避免半截文件。 */
+async function reEncryptAssets(oldKey, newKey) {
+  await ensureDir(ASSETS_DIR);
+  const names = await readdir(ASSETS_DIR);
+  for (const name of names) {
+    if (!ASSET_ID_RE.test(name)) continue;
+    const full = path.join(ASSETS_DIR, name);
+    let buf;
+    try { buf = await readFile(full); } catch { continue; }
+    const dec = decryptAsset(buf, oldKey);
+    if (!dec) continue;
+    const tmp = `${full}.tmp`;
+    await writeFile(tmp, encryptAsset(dec.bytes, dec.mime, newKey));
+    await rename(tmp, full);
+  }
 }
 
 /* ---------------- 密码 / 会话 ---------------- */
@@ -316,7 +412,14 @@ async function createBackup() {
   const p = (n) => String(n).padStart(2, '0');
   const name = `ledger-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.enc`;
   const dest = path.join(BACKUP_DIR, name);
-  await writeFile(dest, encryptBlob(db, currentKey, currentSalt), 'utf8');
+  /* 备份必须连图片资产一起打包，否则恢复后正文引用的图片会丢失。 */
+  const assets = [];
+  for (const id of collectAssetIds(db.docs)) {
+    const a = await readAsset(id, currentKey);
+    if (a) assets.push({ id, mime: a.mime, data: a.bytes.toString('base64') });
+  }
+  const payload = { docs: db.docs, assets };
+  await writeFile(dest, encryptBlob(payload, currentKey, currentSalt), 'utf8');
   const list = await listBackups();
   for (const old of list.slice(BACKUP_KEEP)) {
     try { await unlink(path.join(BACKUP_DIR, old.name)); } catch { /* ignore */ }
@@ -333,7 +436,16 @@ async function restoreBackup(name) {
   if (!decrypted || decrypted.__decryptError || !Array.isArray(decrypted.docs)) {
     throw new Error('备份文件无法解密（可能是更换密码前的旧备份，已失效）');
   }
-  db = decrypted;
+  /* 先恢复图片资产，再切换文档数据，避免正文引用到不存在的图片。 */
+  if (Array.isArray(decrypted.assets) && currentKey) {
+    for (const a of decrypted.assets) {
+      if (!a || !assetPath(a.id)) continue;
+      if (await readAsset(a.id, currentKey)) continue; // 已存在则跳过
+      const bytes = Buffer.from(String(a.data || ''), 'base64');
+      if (bytes.length) await writeAsset(a.id, bytes, a.mime, currentKey);
+    }
+  }
+  db = { docs: decrypted.docs };
   await persist();
 }
 
@@ -496,6 +608,22 @@ async function readBodyText(req, limit = BODY_LIMIT) {
   }
   if (chunks.length === 0) return '';
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/** 读取原始二进制请求体（图片上传用）。 */
+async function readBodyBuffer(req, limit = BODY_LIMIT) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (limit > 0 && size > limit) {
+      const err = new Error(`图片内容过大：${(size / 1024 / 1024).toFixed(1)}MB > 限制 ${(limit / 1024 / 1024).toFixed(0)}MB`);
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function sameOrigin(req) {
@@ -674,6 +802,15 @@ async function handleAuth(req, res, pathname) {
     // 用新密码重新派生密钥，重新加密数据文件 + 重写 auth 哨兵
     const newSalt = randomBytes(16);
     const newKey = deriveKey(np, newSalt);
+    /* 图片资产也用同一把密钥加密，换密码必须先重加密，否则旧资产无法解密。 */
+    if (currentKey) {
+      try {
+        await reEncryptAssets(currentKey, newKey);
+      } catch (e) {
+        await audit('password.change', { ok: false, reason: 'asset_reencrypt', error: e.message }, req);
+        return sendJson(res, 500, { error: '图片资产重新加密失败：' + e.message });
+      }
+    }
     currentKey = newKey;
     currentSalt = newSalt;
     currentPassword = np;
@@ -762,6 +899,46 @@ async function handleDocs(req, res, pathname) {
   return null;
 }
 
+async function handleAssets(req, res, pathname) {
+  // 上传：请求体就是图片原始字节，Content-Type 声明图片类型
+  if (pathname === '/api/assets' && req.method === 'POST') {
+    if (!currentKey) return sendJson(res, 503, { error: '数据尚未加载' });
+    const mime = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!/^image\//.test(mime)) return sendJson(res, 400, { error: '仅支持图片文件' });
+    let bytes;
+    try {
+      bytes = await readBodyBuffer(req, ASSET_LIMIT);
+    } catch (e) {
+      if (e.code === 'PAYLOAD_TOO_LARGE') {
+        return sendJson(res, 413, { error: `图片过大，单张上限 ${Math.round(ASSET_LIMIT / 1024 / 1024)}MB` });
+      }
+      throw e;
+    }
+    if (!bytes || !bytes.length) return sendJson(res, 400, { error: '图片内容为空' });
+    const id = randomUUID();
+    await writeAsset(id, bytes, mime, currentKey);
+    await audit('asset.create', { id, bytes: bytes.length, mime }, req);
+    return sendJson(res, 201, { ok: true, id, url: `/api/assets/${id}` });
+  }
+
+  // 读取：浏览器 <img src> 直接请求，走同源 Cookie 鉴权
+  const matched = pathname.match(/^\/api\/assets\/([0-9a-f-]{36})$/);
+  if (matched && req.method === 'GET') {
+    if (!currentKey) return sendJson(res, 503, { error: '数据尚未加载' });
+    const asset = await readAsset(matched[1], currentKey);
+    if (!asset) return sendJson(res, 404, { error: '图片不存在' });
+    res.writeHead(200, {
+      'content-type': asset.mime,
+      'content-length': asset.bytes.length,
+      /* id 内容不可变，可长期缓存，减少手机端重复解码与流量 */
+      'cache-control': 'private, max-age=31536000, immutable',
+    });
+    res.end(asset.bytes);
+    return true;
+  }
+  return null;
+}
+
 async function handleExtra(req, res, pathname) {
   // 导出：?id=xxx 导出该节点子树；不带 id 导出全部。输出加密包。
   if (pathname === '/api/export' && req.method === 'GET') {
@@ -773,11 +950,20 @@ async function handleExtra(req, res, pathname) {
       ids = collectIds(rootId);
     }
     const docs = ids ? db.docs.filter((d) => ids.includes(d.id)) : db.docs;
+    /* 导出必须带上正文引用的图片资产，否则换机器导入后图片全是坏链。 */
+    const assets = [];
+    if (currentKey) {
+      for (const id of collectAssetIds(docs)) {
+        const a = await readAsset(id, currentKey);
+        if (a) assets.push({ id, mime: a.mime, data: a.bytes.toString('base64') });
+      }
+    }
     const payload = {
       app: 'my-jizhang',
       version: BLOB_VERSION,
       exported_at: new Date().toISOString(),
       docs,
+      assets,
     };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const blob = encryptBlob(payload, currentKey, currentSalt);
@@ -809,6 +995,15 @@ async function handleExtra(req, res, pathname) {
     }
     if (!parsed || !Array.isArray(parsed.docs)) {
       return sendJson(res, 400, { error: '无法解密：该文件可能由不同密码加密，或文件已损坏' });
+    }
+    /* 先落盘导入文件里的图片资产（同 id 已存在时跳过），再建文档树。 */
+    if (Array.isArray(parsed.assets) && currentKey) {
+      for (const a of parsed.assets) {
+        if (!a || !assetPath(a.id)) continue;
+        if (await readAsset(a.id, currentKey)) continue;
+        const bytes = Buffer.from(String(a.data || ''), 'base64');
+        if (bytes.length) await writeAsset(a.id, bytes, a.mime, currentKey);
+      }
     }
     let count = 0;
     try {
@@ -906,6 +1101,8 @@ const server = createServer(async (req, res) => {
       if (isWrite(req.method) && !sameOrigin(req)) return sendJson(res, 403, { error: '非法来源' });
       const r1 = await handleDocs(req, res, pathname);
       if (r1 !== null) return;
+      const ra = await handleAssets(req, res, pathname);
+      if (ra !== null) return;
       const r2 = await handleExtra(req, res, pathname);
       if (r2 !== null && r2 !== true) return; // r2===true 表示已自行结束响应
       if (r2 === true) return;

@@ -1290,57 +1290,83 @@
 
   /* ---------------- 图片 ---------------- */
 
-  function readFileAsDataUrl(file) {
+  function blobToDataUrl(blob) {
     return new Promise((resolve, reject) => {
       const r = new FileReader();
       r.onload = () => resolve(r.result); r.onerror = reject;
-      r.readAsDataURL(file);
+      r.readAsDataURL(blob);
     });
   }
 
+  function dataUrlToBlob(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    const head = comma >= 0 ? dataUrl.slice(0, comma) : '';
+    const bin = atob(dataUrl.slice(comma + 1));
+    const mime = (/data:([^;]+)/.exec(head) || [])[1] || 'image/jpeg';
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: mime });
+  }
+
   /**
-   * 插入前压缩图片：手机原图动辄 3–6MB，base64 内嵌后多张即可撑爆 25MB 上限，
-   * 导致保存失败（413）与低端机内存崩溃。这里降采样到最长边 1600px、JPEG 0.72，
-   * 单图通常降到 100–300KB。GIF/SVG 或压缩后反而更大时回退原图。
+   * 大图降采样：最长边 1600px、JPEG 0.72，返回 { blob, width, height }。
+   * width/height 是降采样后的真实像素，写入 data-nw/nh 供懒加载时预先算好布局。
+   * GIF/SVG 或解码失败时回退原图（不压缩，避免动图被拍成单帧）。
    */
-  function compressImageFile(file) {
+  function prepareImageBlob(blob) {
     return new Promise((resolve) => {
-      const type = (file.type || '').toLowerCase();
-      if (type === 'image/gif' || type === 'image/svg+xml') { resolve(null); return; }
+      const type = (blob.type || '').toLowerCase();
+      if (type === 'image/gif' || type === 'image/svg+xml') { resolve({ blob, width: 0, height: 0 }); return; }
       const img = new Image();
-      const url = URL.createObjectURL(file);
+      const url = URL.createObjectURL(blob);
       img.onload = () => {
         URL.revokeObjectURL(url);
-        let w = img.naturalWidth || 0, h = img.naturalHeight || 0;
-        if (!w || !h) { resolve(null); return; }
+        const ow = img.naturalWidth || 0, oh = img.naturalHeight || 0;
+        if (!ow || !oh) { resolve({ blob, width: 0, height: 0 }); return; }
         const maxDim = 1600;
-        if (w > maxDim || h > maxDim) {
-          if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
-          else { w = Math.round(w * maxDim / h); h = maxDim; }
-        }
+        if (ow <= maxDim && oh <= maxDim) { resolve({ blob, width: ow, height: oh }); return; }
+        let w = ow, h = oh;
+        if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else { w = Math.round(w * maxDim / h); h = maxDim; }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
-        if (!ctx) { resolve(null); return; }
+        if (!ctx) { resolve({ blob, width: ow, height: oh }); return; }
         ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob((blob) => {
-          if (!blob || !blob.size || blob.size >= file.size) { resolve(null); return; }
-          const r = new FileReader();
-          r.onload = () => resolve(r.result);
-          r.onerror = () => resolve(null);
-          r.readAsDataURL(blob);
+        canvas.toBlob((out) => {
+          if (!out || !out.size) { resolve({ blob, width: ow, height: oh }); return; }
+          resolve({ blob: out, width: w, height: h });
         }, 'image/jpeg', 0.72);
       };
-      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve({ blob, width: 0, height: 0 }); };
       img.src = url;
     });
   }
 
-  /** 优先压缩，失败则回退原图 data URL */
-  async function imageFileToSrc(file) {
-    const compressed = await compressImageFile(file);
-    if (compressed) return compressed;
-    return readFileAsDataUrl(file);
+  /** 上传为服务端独立图片资产；失败返回 null，调用方回退 data URL。 */
+  async function uploadAsset(blob) {
+    try {
+      const res = await fetch('/api/assets', {
+        method: 'POST',
+        headers: { 'content-type': blob.type || 'image/jpeg' },
+        body: blob,
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      return data && data.url ? data.url : null;
+    } catch { return null; }
+  }
+
+  /**
+   * 图片文件 → { src, width, height }。
+   * 优先降采样后上传为资产（正文只存 URL，图片不再随文档体积一起膨胀）；
+   * 服务端接口不可用时回退 base64 data URL，保证旧部署仍能插图。
+   */
+  async function imageFileToAsset(file) {
+    const prep = await prepareImageBlob(file);
+    const url = await uploadAsset(prep.blob);
+    const src = url || await blobToDataUrl(prep.blob);
+    return { src, width: prep.width, height: prep.height };
   }
 
   /** 生成一行图片：<p class="img-line"><span class="img-inline"><img><button class="img-dots">⋮</button></span></p> */
@@ -1356,10 +1382,17 @@
     img.className = 'doc-img';
     img.dataset.rotate = '0';
     img.alt = o.alt || '记账凭证';
+    /* 图片独立成 URL 后可以懒加载：屏幕外的图片不解码，直接消除渲染内存峰值 */
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    if (o.width) img.dataset.nw = String(o.width);
+    if (o.height) img.dataset.nh = String(o.height);
     if (o.title) img.title = o.title;
     img.addEventListener('error', () => setStatus('图片加载失败'));
     img.addEventListener('load', () => {
       if (!img.isConnected) return;
+      if (!img.dataset.nw && img.naturalWidth) img.dataset.nw = String(img.naturalWidth);
+      if (!img.dataset.nh && img.naturalHeight) img.dataset.nh = String(img.naturalHeight);
       /* 新图默认自适应所在容器（表格单元格 / 编辑区）宽度 */
       if (!img.dataset.w) img.dataset.w = String(imgContainerWidth(img));
       applyImgGeometry(img);
@@ -1380,7 +1413,9 @@
 
   /** 复制一行图片（保留宽度与旋转角度） */
   function cloneImgLine(img) {
-    const line = createImgLine(img.src, { alt: img.alt, title: img.title });
+    const line = createImgLine(img.src, {
+      alt: img.alt, title: img.title, width: img.dataset.nw, height: img.dataset.nh,
+    });
     const copy = line.querySelector('img.doc-img');
     if (img.dataset.w) copy.dataset.w = img.dataset.w;
     if (img.dataset.rotate) copy.dataset.rotate = img.dataset.rotate;
@@ -1399,14 +1434,15 @@
     saveNow();
   }
 
-  /** 一次插入多张：每张一行，互不关联，可单独删除 */
-  function insertImages(srcs) {
-    if (!state.activeId || !srcs.length) return;
+  /** 一次插入多张：每张一行，互不关联，可单独删除。元素可为 src 字符串或 {src,width,height} */
+  function insertImages(items) {
+    if (!state.activeId || !items.length) return;
+    const norm = items.map((it) => (typeof it === 'string' ? { src: it } : it));
     restoreSelection();
-    let cursor = createImgLine(srcs[0]);
+    let cursor = createImgLine(norm[0].src, norm[0]);
     insertBlockAtCaret(cursor);
-    for (let i = 1; i < srcs.length; i += 1) {
-      const line = createImgLine(srcs[i]);
+    for (let i = 1; i < norm.length; i += 1) {
+      const line = createImgLine(norm[i].src, norm[i]);
       cursor.after(line);
       cursor = line;
     }
@@ -1428,11 +1464,15 @@
     return Math.max(60, Math.round(w));
   }
 
-  /** 期望显示宽度（px）：优先 data-w，其次自然宽度（不超过容器），兜底容器宽度 */
+  /** 期望显示宽度（px）：优先 data-w，其次源图宽度（不超过容器），兜底容器宽度 */
   function imgWidthOf(img) {
     const cw = imgContainerWidth(img);
     let w = parseFloat(img.dataset.w);
-    if (!Number.isFinite(w) || w <= 0) w = Math.min(img.naturalWidth || cw, cw);
+    if (!Number.isFinite(w) || w <= 0) {
+      /* 懒加载图片在滚动到可视区前 naturalWidth 为 0，用记录的真实宽度兜底 */
+      const nw = Number(img.dataset.nw) || img.naturalWidth || 0;
+      w = Math.min(nw || cw, cw);
+    }
     /* 容器（尤其手机端表格）变窄时按容器宽度显示，不溢出 */
     return Math.min(w, cw);
   }
@@ -1447,9 +1487,19 @@
     const box = img.closest('.img-inline');
     if (!box) return;
     let w = imgWidthOf(img);
-    const nw = img.naturalWidth || w;
-    const nh = img.naturalHeight || w;
+    const nw = Number(img.dataset.nw) || img.naturalWidth || 0;
+    const nh = Number(img.dataset.nh) || img.naturalHeight || 0;
     const deg = ((Number(img.dataset.rotate || 0) % 360) + 360) % 360;
+    /* 懒加载图片尚未解码出尺寸：先按显示宽度占位，避免高度塌陷到 0 */
+    if (!nw || !nh) {
+      const pw = Math.round(Math.max(24, w));
+      img.style.width = pw + 'px';
+      img.style.height = 'auto';
+      img.style.maxWidth = 'none';
+      box.style.width = pw + 'px';
+      box.style.height = 'auto';
+      return;
+    }
     /* 旋转 90/270 时横躺占位为 h，若超出容器宽度则等比缩小，避免溢出表格 */
     if ((deg === 90 || deg === 270) && Math.round(w * (nh / nw)) > imgContainerWidth(img)) {
       w = Math.max(24, Math.round(imgContainerWidth(img) * (nw / nh)));
@@ -1495,8 +1545,8 @@
     img.dataset.rotate = String(((cur % 360) + 360) % 360);
     /* 旋转后若横向占位超过容器宽度，立即缩回自适应宽度 */
     const cw = imgContainerWidth(img);
-    const nw = img.naturalWidth || 1;
-    const nh = img.naturalHeight || 1;
+    const nw = Number(img.dataset.nw) || img.naturalWidth || 1;
+    const nh = Number(img.dataset.nh) || img.naturalHeight || 1;
     const deg = Number(img.dataset.rotate);
     const w = parseFloat(img.dataset.w) || Math.min(nw, cw);
     const horiz = deg % 180 === 90 ? w * (nh / nw) : w;
@@ -1519,12 +1569,15 @@
     if (!img) return;
     const cw = imgContainerWidth(img);
     img.dataset.rotate = '0';
-    setImgWidth(img, Math.min(img.naturalWidth || cw, cw));
+    const nw = Number(img.dataset.nw) || img.naturalWidth || cw;
+    setImgWidth(img, Math.min(nw, cw));
   }
 
-  /** 重载文档后按 data-* 还原图片尺寸与旋转 */
+  /** 重载文档后按 data-* 还原图片尺寸与旋转，并给历史图片补上懒加载属性 */
   function normalizeImgs() {
     $$('.img-inline img.doc-img', el.docBody).forEach((img) => {
+      if (!img.getAttribute('loading')) img.setAttribute('loading', 'lazy');
+      if (!img.getAttribute('decoding')) img.setAttribute('decoding', 'async');
       if (img.dataset.w || img.dataset.rotate) applyImgGeometry(img);
     });
   }
@@ -1737,6 +1790,53 @@
       setStatus(`导入完成：共 ${r.count || 0} 项`);
     } catch (e) {
       setStatus('导入失败：' + (e.message || '密码不匹配或文件已损坏'));
+    }
+  }
+
+  /**
+   * 电脑端一键迁移：把历史文档里 base64 内嵌的图片抽出来，
+   * 降采样后上传为独立资产，正文里的 src 换成 /api/assets/<id>。
+   * 逐张处理、单篇保存，避免一次把所有大图都压在内存里。
+   */
+  async function migrateImagesToAssets() {
+    if (!confirm('将把所有文档里的内嵌图片降采样并转为独立图片资产，正文不再内嵌 base64。\n建议在电脑上执行，并先做一次备份。继续？')) return;
+    if (window.matchMedia('(max-width: 760px)').matches && !confirm('检测到手机屏幕，迁移会占用较多内存，确认继续？')) return;
+    await flushSave();
+    setStatus('正在扫描内嵌图片…');
+    const cache = new Map(); // dataUrl -> assetUrl|null，跨文档去重
+    let docCount = 0, imgCount = 0, failCount = 0;
+    const re = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi;
+    try {
+      for (const meta of state.docs.filter((d) => d.kind === 'doc')) {
+        const doc = await getDoc(meta.id);
+        if (!doc || typeof doc.content !== 'string' || doc.content.indexOf('data:image/') < 0) continue;
+        const matches = doc.content.match(re) || [];
+        if (!matches.length) continue;
+        for (const dataUrl of matches) {
+          if (cache.has(dataUrl)) continue;
+          try {
+            const blob = dataUrlToBlob(dataUrl);
+            const prep = await prepareImageBlob(blob);
+            const url = await uploadAsset(prep.blob);
+            cache.set(dataUrl, url || null);
+            if (url) { imgCount += 1; setStatus(`迁移中… 已转存 ${imgCount} 张`); }
+            else failCount += 1;
+          } catch { cache.set(dataUrl, null); failCount += 1; }
+        }
+        const content = doc.content.replace(re, (m) => cache.get(m) || m);
+        if (content !== doc.content) {
+          await api(`/api/docs/${encodeURIComponent(doc.id)}`, { method: 'PUT', body: { content } });
+          docCount += 1;
+        }
+      }
+      await loadDocs();
+      if (state.activeId) {
+        const cur = await getDoc(state.activeId);
+        if (cur) renderDoc(cur);
+      }
+      setStatus(`图片迁移完成：${docCount} 篇 / ${imgCount} 张${failCount ? `，失败 ${failCount} 张（原图保留）` : ''}`);
+    } catch (e) {
+      setStatus('迁移失败：' + (e.message || '未知错误'));
     }
   }
 
@@ -2052,19 +2152,29 @@
 
     /* 图片不再响应右键（改用右上角三点菜单） */
 
+    /* 懒加载图片真正解码后补记真实尺寸并重排（load 不冒泡，用捕获阶段统一处理） */
+    el.docBody.addEventListener('load', (event) => {
+      const img = event.target;
+      if (!img || img.tagName !== 'IMG' || !img.classList.contains('doc-img')) return;
+      if (!img.dataset.nw && img.naturalWidth) img.dataset.nw = String(img.naturalWidth);
+      if (!img.dataset.nh && img.naturalHeight) img.dataset.nh = String(img.naturalHeight);
+      if (!img.dataset.w) img.dataset.w = String(imgContainerWidth(img));
+      applyImgGeometry(img);
+    }, true);
+
     /* 粘贴图片 */
     el.docBody.addEventListener('paste', async (event) => {
       const items = event.clipboardData ? Array.from(event.clipboardData.items) : [];
       const imageItems = items.filter((it) => it.type && it.type.startsWith('image/'));
       if (!imageItems.length) return;
       event.preventDefault();
-      const urls = [];
+      const prepared = [];
       for (const it of imageItems) {
         const file = it.getAsFile();
-        if (file) urls.push(await imageFileToSrc(file));
+        if (file) prepared.push(await imageFileToAsset(file));
       }
-      if (urls.length === 1) insertImage(urls[0]);
-      else insertImages(urls);
+      if (prepared.length === 1) insertImage(prepared[0].src, prepared[0]);
+      else insertImages(prepared);
     });
 
     /* 工具栏 */
@@ -2122,10 +2232,10 @@
       const imgs = files.filter((f) => f.type.startsWith('image/'));
       if (!imgs.length) { window.alert('请选择图片文件'); return; }
       if (imgs.length > 8) { window.alert('一次最多插入 8 张图片'); return; }
-      const urls = [];
-      for (const f of imgs) urls.push(await imageFileToSrc(f));
-      if (urls.length === 1) insertImage(urls[0]);
-      else insertImages(urls);
+      const items = [];
+      for (const f of imgs) items.push(await imageFileToAsset(f));
+      if (items.length === 1) insertImage(items[0].src, items[0]);
+      else insertImages(items);
     });
 
     $('#btn-net-image').addEventListener('click', () => {
@@ -2158,6 +2268,7 @@
     });
     $('#btn-export-all').addEventListener('click', () => exportNode(null));
     $('#btn-import-file').addEventListener('click', () => el.importInput.click());
+    $('#btn-migrate-assets').addEventListener('click', migrateImagesToAssets);
     el.importInput.addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) doImport(f);

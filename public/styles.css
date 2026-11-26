@@ -448,8 +448,12 @@ button { cursor: pointer; }
 .img-line {
   display: block; margin: 8px 0; min-height: 1.2em;
   line-height: 1; text-align: left;
+  /* 屏幕外的图片行跳过渲染与解码，配合 loading=lazy 把渲染内存压到可视区域 */
+  content-visibility: auto;
+  contain-intrinsic-size: 260px;
+  contain-intrinsic-size: auto 260px;
 }
-.img-line:empty { min-height: 0; margin: 2px 0; }
+.img-line:empty { min-height: 0; margin: 2px 0; content-visibility: visible; }
 .img-line.align-left { text-align: left; }
 .img-line.align-right { text-align: right; }
 .img-line.align-center { text-align: center; }
