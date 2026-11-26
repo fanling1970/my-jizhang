@@ -177,17 +177,17 @@ button { cursor: pointer; }
 
 .node-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
-.node-actions { display: none; align-items: center; gap: 0; flex-shrink: 0; }
-.tree-row:hover .node-actions, .tree-row:focus-within .node-actions { display: flex; }
+/* 节点操作按钮常显（手机端无 hover，参照思源） */
+.node-actions { display: flex; align-items: center; gap: 0; flex-shrink: 0; }
 
 .node-add, .node-more {
   display: grid; place-items: center;
-  width: 18px; height: 18px; padding: 0;
+  width: 20px; height: 20px; padding: 0;
   border: 0; border-radius: 3px;
   background: transparent; color: var(--muted);
   font-size: 13px; line-height: 1;
 }
-.node-more svg { width: 11px; height: 11px; }
+.node-more svg { width: 12px; height: 12px; }
 .node-add:hover, .node-more:hover { background: var(--hover-strong); color: var(--text); }
 
 /* ---------- 编辑器 ---------- */
@@ -489,7 +489,7 @@ button { cursor: pointer; }
 
 /* ---------- 右键菜单 ---------- */
 .ctx-menu {
-  position: fixed; z-index: 50;
+  position: fixed; z-index: 150;
   display: none; flex-direction: column;
   min-width: 170px; padding: 4px;
   border: 1px solid var(--border); border-radius: 5px;
@@ -806,6 +806,9 @@ button { cursor: pointer; }
   .sidebar.collapsed { width: min(80vw, 300px); border-right-width: 1px; }
   .sidebar.mobile-open { transform: translateX(0); }
   .sidebar-collapsed { display: none !important; }
+  /* 目录树常显操作按钮，手指可点 */
+  .tree-row { height: 34px; }
+  .node-add, .node-more { width: 24px; height: 24px; }
 
   .doc-inner { padding: 12px 12px 0; }
   .doc-title { font-size: 23px; }

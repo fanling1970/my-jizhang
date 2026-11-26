@@ -164,28 +164,39 @@
     if (el.sidebarMask) el.sidebarMask.hidden = true;
   }
 
-  /** 边缘右滑打开、抽屉内左滑关闭 */
+  /** 编辑区任意位置右滑打开抽屉、抽屉内左滑关闭（不依赖屏幕左边缘，避开系统返回手势） */
   function bindMobileSidebarSwipe() {
     let start = null;
     document.addEventListener('touchstart', (e) => {
       if (!isMobileUi() || e.touches.length !== 1) { start = null; return; }
       const t = e.touches[0];
+      const target = e.target;
+      /* 菜单/滑杆/横向可滚动区域上的手势不当作拉抽屉 */
+      if (target && target.closest && target.closest('.ctx-menu, .img-ctx-menu, input[type="range"], .modal, .tab-strip')) {
+        start = null; return;
+      }
       const opened = el.sidebar.classList.contains('mobile-open');
       const sidebarW = el.sidebar.getBoundingClientRect().width || 280;
-      if (!opened && t.clientX <= 26) start = { x: t.clientX, y: t.clientY, mode: 'open' };
-      else if (opened && t.clientX <= sidebarW) start = { x: t.clientX, y: t.clientY, mode: 'close' };
-      else start = null;
+      if (opened) {
+        /* 抽屉展开时，只有从抽屉上开始左滑才收起 */
+        start = t.clientX <= sidebarW ? { x: t.clientX, y: t.clientY, mode: 'close' } : null;
+      } else {
+        /* 抽屉收起时，编辑区任意位置右滑都可拉出 */
+        start = { x: t.clientX, y: t.clientY, mode: 'open' };
+      }
     }, { passive: true });
     document.addEventListener('touchmove', (e) => {
       if (!start || e.touches.length !== 1) return;
       const t = e.touches[0];
       const dx = t.clientX - start.x;
       const dy = t.clientY - start.y;
-      if (Math.abs(dy) > Math.abs(dx)) { start = null; return; }
-      if (start.mode === 'open' && dx > 40) { openMobileSidebar(); start = null; }
-      else if (start.mode === 'close' && dx < -40) { closeMobileSidebar(); start = null; }
+      /* 纵向为主的滑动交给页面滚动 */
+      if (Math.abs(dy) > Math.abs(dx) * 0.9) { start = null; return; }
+      if (start.mode === 'open' && dx > 55) { openMobileSidebar(); start = null; }
+      else if (start.mode === 'close' && dx < -45) { closeMobileSidebar(); start = null; }
     }, { passive: true });
     document.addEventListener('touchend', () => { start = null; }, { passive: true });
+    document.addEventListener('touchcancel', () => { start = null; }, { passive: true });
   }
 
   /* ---------------- 数据 ---------------- */
@@ -345,10 +356,11 @@
   function renderRow(doc, depth, byParent) {
     const children = byParent.get(doc.id) || [];
     const isFolder = doc.kind === 'folder';
-    const open = isFolder && state.expanded.has(doc.id);
+    const open = state.expanded.has(doc.id);
     const selected = doc.id === state.activeId;
     const padding = 10 + depth * 16;
-    const caret = isFolder && children.length
+    /* 目录和文档都可以有子页面，有子级才显示展开箭头 */
+    const caret = children.length
       ? `<button class="caret ${open ? 'open' : ''}" data-act="toggle">${ICON.chevron}</button>`
       : '<span class="caret-space"></span>';
     const row =
@@ -358,11 +370,11 @@
       `<span class="node-icon ${isFolder ? 'folder' : 'doc'}">${isFolder ? ICON.folder : ICON.doc}</span>` +
       `<span class="node-name" title="${escapeAttr(doc.name)}">${escapeHtml(doc.name)}</span>` +
       `<span class="node-actions">` +
-      (isFolder ? `<button class="node-add" data-act="add" title="新建子文档">＋</button>` : '') +
+      `<button class="node-add" data-act="add" title="${isFolder ? '新建子文档' : '新建子页面'}">＋</button>` +
       `<button class="node-more" data-act="more" title="更多菜单">${ICON.more}</button>` +
       `</span>` +
       '</div>';
-    if (!isFolder || !open) return row;
+    if (!open) return row;
     return row + children.map((c) => renderRow(c, depth + 1, byParent)).join('');
   }
 
@@ -442,6 +454,7 @@
       <div class="ctx-divider"></div>
       <button data-act="above">在上方新建文档</button>
       <button data-act="below">在下方新建文档</button>
+      <button data-act="inner-doc">在内部新建子页面</button>
       <button data-act="duplicate">复制</button>
       <div class="ctx-divider"></div>
       <button data-act="open-right">在页签右侧打开 <span class="shortcut">Alt+点击</span></button>
@@ -1810,6 +1823,8 @@
       } else if (act === 'delete') {
         await deleteDoc(doc);
       } else if (act === 'child-doc') {
+        await createDoc(doc.id, 'doc');
+      } else if (act === 'inner-doc') {
         await createDoc(doc.id, 'doc');
       } else if (act === 'child-folder') {
         await createDoc(doc.id, 'folder');
