@@ -137,6 +137,13 @@ button { cursor: pointer; }
 .sidebar-collapsed[hidden] { display: none; }
 .expand-btn { width: 28px; height: 28px; }
 
+/* 手机端抽屉遮罩 */
+.sidebar-mask {
+  position: fixed; inset: 0; z-index: 94;
+  background: rgba(0, 0, 0, 0.34);
+}
+.sidebar-mask[hidden] { display: none; }
+
 .tree { flex: 1; overflow-y: auto; padding: 2px 4px 16px; }
 
 .tree::-webkit-scrollbar { width: 8px; }
@@ -770,7 +777,20 @@ button { cursor: pointer; }
 
 /* ---------- 窄屏 ---------- */
 @media (max-width: 760px) {
-  .sidebar { width: 180px; }
+  /* 手机端：目录树改为左侧抽屉，默认收起，从左边缘右滑打开 */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 95;
+    width: min(80vw, 300px);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 26px rgba(0, 0, 0, 0.2);
+    transform: translateX(-102%);
+    transition: transform 0.22s ease;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .sidebar.collapsed { width: min(80vw, 300px); border-right-width: 1px; }
+  .sidebar.mobile-open { transform: translateX(0); }
+  .sidebar-collapsed { display: none !important; }
+
   .doc-inner { padding: 12px 12px 0; }
   .doc-title { font-size: 23px; }
 

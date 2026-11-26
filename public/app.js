@@ -21,6 +21,7 @@
     ctxMenu: $('#ctx-menu'),
     sidebar: $('#sidebar'),
     sidebarCollapsed: $('#sidebar-collapsed'),
+    sidebarMask: $('#sidebar-mask'),
     btnLocate: $('#btn-locate'),
     btnFoldall: $('#btn-foldall'),
     btnSidebarMore: $('#btn-sidebar-more'),
@@ -146,6 +147,45 @@
     el.sidebar.classList.remove('collapsed');
     el.sidebarCollapsed.hidden = true;
     if (!silent) persistUi();
+  }
+
+  /* ---------------- 手机端侧边栏抽屉（默认收起，右滑打开） ---------------- */
+
+  function isMobileUi() {
+    try { return window.matchMedia('(max-width: 760px)').matches; } catch { return false; }
+  }
+  function openMobileSidebar() {
+    if (!isMobileUi()) return;
+    el.sidebar.classList.add('mobile-open');
+    if (el.sidebarMask) el.sidebarMask.hidden = false;
+  }
+  function closeMobileSidebar() {
+    el.sidebar.classList.remove('mobile-open');
+    if (el.sidebarMask) el.sidebarMask.hidden = true;
+  }
+
+  /** 边缘右滑打开、抽屉内左滑关闭 */
+  function bindMobileSidebarSwipe() {
+    let start = null;
+    document.addEventListener('touchstart', (e) => {
+      if (!isMobileUi() || e.touches.length !== 1) { start = null; return; }
+      const t = e.touches[0];
+      const opened = el.sidebar.classList.contains('mobile-open');
+      const sidebarW = el.sidebar.getBoundingClientRect().width || 280;
+      if (!opened && t.clientX <= 26) start = { x: t.clientX, y: t.clientY, mode: 'open' };
+      else if (opened && t.clientX <= sidebarW) start = { x: t.clientX, y: t.clientY, mode: 'close' };
+      else start = null;
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!start || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+      if (Math.abs(dy) > Math.abs(dx)) { start = null; return; }
+      if (start.mode === 'open' && dx > 40) { openMobileSidebar(); start = null; }
+      else if (start.mode === 'close' && dx < -40) { closeMobileSidebar(); start = null; }
+    }, { passive: true });
+    document.addEventListener('touchend', () => { start = null; }, { passive: true });
   }
 
   /* ---------------- 数据 ---------------- */
@@ -1398,6 +1438,12 @@
     try { return window.matchMedia('(max-width: 760px), (max-height: 520px)').matches; } catch { return false; }
   }
 
+  /* 手机端：调整完缩放比例后自动收起菜单，方便查看图片效果 */
+  function autoHideImgMenuOnMobile() {
+    if (!imgMenuIsSheet()) return;
+    setTimeout(() => { if (imgCtxTarget) hideImgCtxMenu(); }, 200);
+  }
+
   /* 图片菜单：由图片右上角三点弹出 */
   function showImgCtxMenu(x, y, img) {
     hideCtxMenu();
@@ -1663,8 +1709,12 @@
       e.stopPropagation();
       showSidebarMoreMenu(e.clientX, e.clientY);
     });
-    el.btnSidebarCollapse.addEventListener('click', collapseSidebar);
+    el.btnSidebarCollapse.addEventListener('click', () => {
+      if (isMobileUi()) closeMobileSidebar(); else collapseSidebar();
+    });
     el.sidebarCollapsed.addEventListener('click', expandSidebar);
+    if (el.sidebarMask) el.sidebarMask.addEventListener('click', closeMobileSidebar);
+    bindMobileSidebarSwipe();
 
     /* 目录树 */
     el.tree.addEventListener('click', (event) => {
@@ -1688,7 +1738,7 @@
         return;
       }
       if (doc.kind === 'folder') toggleExpand(doc.id);
-      else openDoc(doc.id);
+      else { openDoc(doc.id); if (isMobileUi()) closeMobileSidebar(); }
     });
 
     el.tree.addEventListener('contextmenu', (event) => {
@@ -2123,12 +2173,14 @@
       applyImgWidth(Number(el.imgWidthPct.value), 'pct');
       updateImgCtxSize();
     });
+    el.imgWidthPct.addEventListener('change', autoHideImgMenuOnMobile);
     el.imgWidthPx.addEventListener('change', () => {
       if (!imgCtxTarget) return;
       const v = Number(el.imgWidthPx.value);
       if (!Number.isFinite(v) || v <= 0) return;
       applyImgWidth(v, 'px');
       updateImgCtxSize();
+      autoHideImgMenuOnMobile();
     });
     $$('.img-size-presets[data-kind="width"] button', el.imgCtxMenu).forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2139,12 +2191,14 @@
         el.imgWidthPct.value = pct;
         el.imgWidthPctLabel.textContent = pct + '%';
         updateImgCtxSize();
+        autoHideImgMenuOnMobile();
       });
     });
     $('button[data-reset="width"]', el.imgCtxMenu).addEventListener('click', () => {
       if (!imgCtxTarget) return;
       resetImg();
       updateImgCtxSize();
+      autoHideImgMenuOnMobile();
     });
 
     // 高度
@@ -2154,12 +2208,14 @@
       applyImgHeight(Number(el.imgHeightPct.value), 'pct');
       updateImgCtxSize();
     });
+    el.imgHeightPct.addEventListener('change', autoHideImgMenuOnMobile);
     el.imgHeightPx.addEventListener('change', () => {
       if (!imgCtxTarget) return;
       const v = Number(el.imgHeightPx.value);
       if (!Number.isFinite(v) || v <= 0) return;
       applyImgHeight(v, 'px');
       updateImgCtxSize();
+      autoHideImgMenuOnMobile();
     });
     $$('.img-size-presets[data-kind="height"] button', el.imgCtxMenu).forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2169,12 +2225,14 @@
         el.imgHeightPct.value = pct;
         el.imgHeightPctLabel.textContent = pct + '%';
         updateImgCtxSize();
+        autoHideImgMenuOnMobile();
       });
     });
     $('button[data-reset="height"]', el.imgCtxMenu).addEventListener('click', () => {
       if (!imgCtxTarget) return;
       resetImg();
       updateImgCtxSize();
+      autoHideImgMenuOnMobile();
     });
 
     /* 滚动与窗口 */
@@ -2193,6 +2251,8 @@
     });
     window.addEventListener('resize', () => {
       if (imgCtxTarget) updateImgCtxSize();
+      /* 旋屏/缩放后：切到桌面尺寸时关闭手机抽屉 */
+      if (!isMobileUi()) closeMobileSidebar();
     });
 
     /* 点击空白处关闭菜单 */
@@ -2243,6 +2303,7 @@
     catch { el.tree.innerHTML = '<div class="tree-empty">加载失败，请刷新重试</div>'; return; }
 
     restoreUi();
+    if (isMobileUi()) { el.sidebar.classList.remove('collapsed'); el.sidebarCollapsed.hidden = true; closeMobileSidebar(); }
     renderTree();
 
     const rootFolder = state.docs.find((d) => !d.parent_id && d.kind === 'folder');
