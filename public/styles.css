@@ -515,6 +515,38 @@ button { cursor: pointer; }
 }
 .img-ctx-menu[hidden] { display: none; }
 
+/* ---------- 移动端：图片菜单改为底部抽屉（可上下滚动，思源风格） ---------- */
+@media (max-width: 760px), (max-height: 520px) {
+  .img-ctx-menu {
+    left: 0 !important; right: 0 !important;
+    top: auto !important; bottom: 0 !important;
+    width: auto !important;
+    max-height: 86vh; max-height: 86dvh;
+    overflow-y: auto; overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: 4px 6px calc(10px + env(safe-area-inset-bottom, 0px));
+    border: 0; border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.18);
+    animation: imgSheetUp 0.22s ease-out;
+  }
+  /* 顶部拖拽条 */
+  .img-ctx-menu::before {
+    content: ''; flex: 0 0 auto; align-self: center;
+    width: 40px; height: 4px; margin: 2px 0 8px;
+    border-radius: 2px; background: rgba(0, 0, 0, 0.18);
+  }
+  /* 触屏加大点击区域 */
+  .img-ctx-section button { min-height: 42px; font-size: 14px; }
+  .img-ctx-field input { height: 34px; font-size: 13.5px; }
+  .img-size-title { min-height: 42px; }
+}
+
+@keyframes imgSheetUp {
+  from { transform: translateY(28px); opacity: 0.5; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 .img-ctx-section { display: flex; flex-direction: column; gap: 1px; }
 .img-ctx-section + .img-ctx-section { border-top: 1px solid var(--border); padding-top: 5px; margin-top: 3px; }
 

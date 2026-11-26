@@ -1393,6 +1393,11 @@
     });
   }
 
+  /* 移动端（窄屏/矮屏）图片菜单为底部抽屉，可滚动 */
+  function imgMenuIsSheet() {
+    try { return window.matchMedia('(max-width: 760px), (max-height: 520px)').matches; } catch { return false; }
+  }
+
   /* 图片菜单：由图片右上角三点弹出 */
   function showImgCtxMenu(x, y, img) {
     hideCtxMenu();
@@ -1405,6 +1410,14 @@
     $$('.img-size-title.open', el.imgCtxMenu).forEach((n) => n.classList.remove('open'));
     updateImgCtxSize();
     el.imgCtxMenu.hidden = false;
+    el.imgCtxMenu.scrollTop = 0;
+    if (imgMenuIsSheet()) {
+      /* 底部抽屉：定位交给 CSS，清掉旧的绝对坐标 */
+      el.imgCtxMenu.style.left = '';
+      el.imgCtxMenu.style.top = '';
+      el.imgCtxMenu.classList.add('show');
+      return;
+    }
     el.imgCtxMenu.style.left = `${Math.min(x, window.innerWidth - 348)}px`;
     el.imgCtxMenu.style.top = `${Math.min(y, window.innerHeight - 120)}px`;
     el.imgCtxMenu.classList.add('show');
@@ -1417,6 +1430,8 @@
   function hideImgCtxMenu() {
     el.imgCtxMenu.classList.remove('show');
     el.imgCtxMenu.hidden = true;
+    el.imgCtxMenu.style.left = '';
+    el.imgCtxMenu.style.top = '';
     imgCtxTarget = null;
   }
 
@@ -2028,6 +2043,13 @@
         const panel = el.imgCtxMenu.querySelector(`.img-size-sub[data-submenu="${key}"]`);
         if (panel) panel.classList.toggle('open');
         btn.classList.toggle('open');
+        if (imgMenuIsSheet()) {
+          /* 抽屉模式：展开后滚动到该面板，避免被遮住 */
+          requestAnimationFrame(() => {
+            if (panel && panel.classList.contains('open')) panel.scrollIntoView({ block: 'nearest' });
+          });
+          return;
+        }
         requestAnimationFrame(() => {
           const h = el.imgCtxMenu.offsetHeight;
           const top = parseFloat(el.imgCtxMenu.style.top) || 8;
