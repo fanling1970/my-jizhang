@@ -522,6 +522,16 @@ button { cursor: pointer; }
 }
 .img-ctx-menu[hidden] { display: none; }
 
+/* 图片菜单关闭按钮（仅手机端抽屉显示） */
+.img-ctx-close {
+  display: none;
+  place-items: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 50%;
+  background: var(--hover-strong); color: var(--text-soft);
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+
 /* ---------- 移动端：图片菜单改为底部抽屉（可上下滚动，思源风格） ---------- */
 @media (max-width: 760px), (max-height: 520px) {
   .img-ctx-menu {
@@ -547,6 +557,11 @@ button { cursor: pointer; }
   .img-ctx-section button { min-height: 42px; font-size: 14px; }
   .img-ctx-field input { height: 34px; font-size: 13.5px; }
   .img-size-title { min-height: 42px; }
+
+  /* 右上角关闭按钮 */
+  .img-ctx-close {
+    display: grid; position: absolute; top: 8px; right: 8px; z-index: 3;
+  }
 }
 
 @keyframes imgSheetUp {
@@ -583,7 +598,7 @@ button { cursor: pointer; }
   background: #fbfcfe; height: auto; padding: 0; vertical-align: top;
   border-bottom: 1px dashed var(--border);
 }
-.voucher-wrap { position: relative; padding: 6px 8px 6px 28px; min-height: 40px; }
+.voucher-wrap { position: relative; padding: 6px 30px 6px 8px; min-height: 40px; }
 .voucher-cell {
   min-height: 28px; outline: none;
   font-size: 13px; line-height: 1.5; color: var(--text);
@@ -593,10 +608,10 @@ button { cursor: pointer; }
 }
 .voucher-cell .img-line { margin: 4px 0; }
 .voucher-del {
-  position: absolute; top: 4px; left: 6px;
-  width: 18px; height: 18px; padding: 0; line-height: 1;
+  position: absolute; top: 4px; right: 4px;
+  width: 20px; height: 20px; padding: 0; line-height: 1;
   border: 0; border-radius: 3px; background: transparent;
-  color: #b9bec6; font-size: 12px; cursor: pointer;
+  color: #b9bec6; font-size: 12px; cursor: pointer; z-index: 2;
 }
 .voucher-del:hover { background: var(--expense-bg); color: var(--expense); }
 
@@ -807,10 +822,31 @@ button { cursor: pointer; }
     padding: 4px 8px; row-gap: 2px; overflow-x: visible;
   }
 
-  /* 表格可横向滑动，内容列不被压没、金额不重合 */
-  .ledger-table { min-width: 520px; }
-  .c-date { width: 108px; }
-  .c-type { width: 74px; }
-  .c-amount { width: 96px; }
-  .c-op { width: 30px; }
+  /* 表格自适应屏幕宽度：不再横向滑动，缩小固定列、隐藏下拉箭头 */
+  .ledger { overflow-x: hidden; width: 100% !important; }
+  .ledger-table { min-width: 0; font-size: 12px; }
+  .ledger-table th { padding: 0 4px; font-size: 11px; }
+  .ledger-table input, .ledger-table select { padding: 0 4px; font-size: 12px; }
+  /* colgroup 上带了内联宽度，需要 !important 才能覆盖 */
+  .ledger-table col.col-date { width: 78px !important; }
+  .ledger-table col.col-type { width: 50px !important; }
+  .ledger-table col.col-desc { width: auto !important; }
+  .ledger-table col.col-amount { width: 66px !important; }
+  .ledger-table col.col-op { width: 20px !important; }
+  .c-date { width: 78px; }
+  .c-type { width: 50px; }
+  .c-amount { width: 66px; }
+  .c-op { width: 20px; }
+  /* 隐藏日期 / 收支下拉箭头（点了照样弹出选择） */
+  .ledger-table select.lg-type {
+    -webkit-appearance: none; appearance: none;
+    background-image: none; padding-right: 1px;
+  }
+  .ledger-table input[type="date"]::-webkit-calendar-picker-indicator { display: none; }
+  .ledger-table input[type="date"]::-webkit-inner-spin-button { display: none; }
+  .ledger-table input[type="date"] { padding-right: 1px; }
+  /* 手机端不需要拖拽调宽手柄 */
+  .ledger-resize { display: none; }
+  /* 凭证行删除按钮加大点击区域 */
+  .voucher-del { width: 26px; height: 26px; font-size: 14px; }
 }

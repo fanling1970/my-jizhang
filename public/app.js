@@ -1293,7 +1293,9 @@
     img.addEventListener('error', () => setStatus('图片加载失败'));
     img.addEventListener('load', () => {
       if (!img.isConnected) return;
-      if (img.dataset.w || img.dataset.rotate) applyImgGeometry(img);
+      /* 新图默认自适应所在容器（表格单元格 / 编辑区）宽度 */
+      if (!img.dataset.w) img.dataset.w = String(imgContainerWidth(img));
+      applyImgGeometry(img);
     });
     img.src = src;
 
@@ -1348,12 +1350,24 @@
 
   /* ---------------- 图片尺寸与旋转 ---------------- */
 
-  /** 期望显示宽度（px）：优先 data-w，其次自然宽度，兜底容器宽度 */
+  /** 图片可用宽度：表格内按单元格宽度，正文按编辑区宽度（自适应表格的依据） */
+  function imgContainerWidth(img) {
+    let host = null;
+    if (img) {
+      host = img.closest('.voucher-cell') || img.closest('td');
+    }
+    let w = host ? host.clientWidth : 0;
+    if (!w) w = el.docBody.clientWidth || 720;
+    return Math.max(60, Math.round(w));
+  }
+
+  /** 期望显示宽度（px）：优先 data-w，其次自然宽度（不超过容器），兜底容器宽度 */
   function imgWidthOf(img) {
-    const cw = el.docBody.clientWidth || 720;
+    const cw = imgContainerWidth(img);
     let w = parseFloat(img.dataset.w);
     if (!Number.isFinite(w) || w <= 0) w = Math.min(img.naturalWidth || cw, cw);
-    return w;
+    /* 容器（尤其手机端表格）变窄时按容器宽度显示，不溢出 */
+    return Math.min(w, cw);
   }
 
   /**
@@ -1365,11 +1379,15 @@
     if (!img) return;
     const box = img.closest('.img-inline');
     if (!box) return;
-    const w = imgWidthOf(img);
+    let w = imgWidthOf(img);
     const nw = img.naturalWidth || w;
     const nh = img.naturalHeight || w;
-    const h = Math.round(w * (nh / nw));
     const deg = ((Number(img.dataset.rotate || 0) % 360) + 360) % 360;
+    /* 旋转 90/270 时横躺占位为 h，若超出容器宽度则等比缩小，避免溢出表格 */
+    if ((deg === 90 || deg === 270) && Math.round(w * (nh / nw)) > imgContainerWidth(img)) {
+      w = Math.max(24, Math.round(imgContainerWidth(img) * (nw / nh)));
+    }
+    const h = Math.round(w * (nh / nw));
 
     img.style.width = Math.round(w) + 'px';
     img.style.height = 'auto';
@@ -1392,11 +1410,11 @@
     }
   }
 
-  /** 统一入口：设置宽度后重排并记录 */
+  /** 统一入口：设置宽度后重排并记录（宽度不超过所在容器，避免溢出表格） */
   function setImgWidth(img, w) {
     if (!img) return;
-    const cw = el.docBody.clientWidth || 720;
-    const px = Math.max(24, Math.min(Math.round(w), cw * 3));
+    const cw = imgContainerWidth(img);
+    const px = Math.max(24, Math.min(Math.round(w), cw));
     img.dataset.w = String(px);
     applyImgGeometry(img);
     markDirty();
@@ -1408,6 +1426,17 @@
     if (!img) return;
     const cur = Number(img.dataset.rotate || 0) + delta;
     img.dataset.rotate = String(((cur % 360) + 360) % 360);
+    /* 旋转后若横向占位超过容器宽度，立即缩回自适应宽度 */
+    const cw = imgContainerWidth(img);
+    const nw = img.naturalWidth || 1;
+    const nh = img.naturalHeight || 1;
+    const deg = Number(img.dataset.rotate);
+    const w = parseFloat(img.dataset.w) || Math.min(nw, cw);
+    const horiz = deg % 180 === 90 ? w * (nh / nw) : w;
+    if (horiz > cw) {
+      const fit = deg % 180 === 90 ? cw * (nw / nh) : cw;
+      img.dataset.w = String(Math.max(24, Math.round(fit)));
+    }
     applyImgGeometry(img);
     markDirty();
     updateImgCtxSize();
@@ -1416,12 +1445,12 @@
 
   function fitImgWidth(img) {
     if (!img) return;
-    setImgWidth(img, el.docBody.clientWidth || 720);
+    setImgWidth(img, imgContainerWidth(img));
   }
 
   function resetImg(img) {
     if (!img) return;
-    const cw = el.docBody.clientWidth || 720;
+    const cw = imgContainerWidth(img);
     img.dataset.rotate = '0';
     setImgWidth(img, Math.min(img.naturalWidth || cw, cw));
   }
@@ -1487,7 +1516,7 @@
     const nw = imgCtxTarget.naturalWidth || w;
     const nh = imgCtxTarget.naturalHeight || w;
     const h = w * (nh / nw);
-    const cw = el.docBody.clientWidth || 720;
+    const cw = imgContainerWidth(imgCtxTarget);
 
     const pct = Math.round((w / cw) * 100);
     el.imgWidthPx.value = Math.round(w);
@@ -1502,7 +1531,7 @@
 
   function applyImgWidth(pctOrPx, unit) {
     if (!imgCtxTarget) return;
-    const cw = el.docBody.clientWidth || 720;
+    const cw = imgContainerWidth(imgCtxTarget);
     setImgWidth(imgCtxTarget, unit === 'pct' ? cw * (pctOrPx / 100) : pctOrPx);
   }
 
@@ -2087,6 +2116,9 @@
       const btn = event.target.closest('button');
       if (!btn || !imgCtxTarget) return;
 
+      /* 右上角关闭按钮 */
+      if (btn.id === 'img-ctx-close') { hideImgCtxMenu(); return; }
+
       /* 宽度 / 高度 折叠面板 */
       if (btn.dataset.submenu) {
         const key = btn.dataset.submenu;
@@ -2253,6 +2285,8 @@
       if (imgCtxTarget) updateImgCtxSize();
       /* 旋屏/缩放后：切到桌面尺寸时关闭手机抽屉 */
       if (!isMobileUi()) closeMobileSidebar();
+      /* 图片按新容器宽度重新自适应（表格内图片不溢出） */
+      $$('.img-inline img.doc-img', el.docBody).forEach((img) => applyImgGeometry(img));
     });
 
     /* 点击空白处关闭菜单 */
