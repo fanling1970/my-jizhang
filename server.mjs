@@ -461,7 +461,7 @@ function seed() {
   db.docs.push({ id: rootId, parent_id: null, name: '我的笔记本', kind: 'folder', content: '', sort: 0, created_at: now, updated_at: now });
   db.docs.push(make(rootId, 'daily note', 'doc', '<p>随手记点什么。</p>', 1));
   const yearId = randomUUID();
-  db.docs.push({ id: yearId, parent_id: rootId, name: '2026年', kind: 'folder', content: '', sort: 2, created_at: now, updated_at: now });
+  db.docs.push({ id: yearId, parent_id: rootId, name: '2026年', kind: 'doc', content: '', sort: 2, created_at: now, updated_at: now });
   for (let month = 1; month <= 12; month += 1) {
     db.docs.push(make(yearId, `2026年${month}月`, 'doc', month === 11 ? SAMPLE_NOVEMBER : '', month));
   }
@@ -469,6 +469,20 @@ function seed() {
 
 async function readLedgerRaw() {
   try { return await readFile(DATA_FILE, 'utf8'); } catch { return null; }
+}
+
+/**
+ * 目录结构整理：只保留顶级笔记本为目录（folder），其余目录一律转为页面（doc）。
+ * 页面仍可拥有子页面，因此「2026年」这类中间层会变成可打开的页面。
+ * 返回是否发生改动。
+ */
+function normalizeLayout() {
+  let changed = 0;
+  for (const doc of db.docs) {
+    if (doc.kind === 'folder' && doc.parent_id) { doc.kind = 'doc'; changed += 1; }
+  }
+  if (changed) console.log(`[my-jizhang] 已将 ${changed} 个多级目录转为页面（仅保留顶级笔记本为目录）。`);
+  return changed > 0;
 }
 
 function ledgerFormat(raw) {
@@ -500,6 +514,8 @@ async function ensureStoreLoaded(password) {
     currentSalt = Buffer.from(blob.salt, 'hex');
     currentPassword = password;
     storeLoaded = true;
+    /* 旧数据里的多级目录统一转为页面，只保留顶级笔记本 */
+    if (normalizeLayout()) await persist();
     // 若 auth 仍是旧哈希格式，顺手迁到哨兵格式（与 ledger 同 salt/key）
     const loadedAuth = await loadAuth();
     if (loadedAuth && loadedAuth.format !== 'new') {
@@ -529,6 +545,7 @@ async function ensureStoreLoaded(password) {
   currentSalt = newSalt;
   currentPassword = password;
   storeLoaded = true;
+  normalizeLayout();
   await persist(); // 用新密钥重新加密落盘
   await writeAuthVerifier(newKey, newSalt);
   // 迁移成功后删除 master.key，数据自此仅与登录密码绑定
@@ -650,49 +667,89 @@ function cookieHeader(token, maxAge) {
   return parts.join('; ');
 }
 
-/** 在服务端构建导入树（与前端 doImport 逻辑一致）。返回导入数量。 */
-function importDocsIntoDb(docs) {
+/** 导入文件中的顶层节点：父节点不在这批导入数据里。 */
+function importRootsOf(valid) {
+  const ids = new Set(valid.map((d) => d.id));
+  return valid.filter((d) => !d.parent_id || !ids.has(d.parent_id));
+}
+
+/** 预检：导入到 parentId 时，顶层节点与现有子页面重名的列表。 */
+function importConflicts(docs, parentId) {
+  const valid = (docs || []).filter((d) => d && d.id && d.name);
+  const names = new Set(importRootsOf(valid).map((d) => String(d.name).trim()).filter(Boolean));
+  if (!names.size) return [];
+  return db.docs
+    .filter((d) => (d.parent_id || null) === (parentId || null) && names.has(d.name))
+    .map((d) => d.name);
+}
+
+/**
+ * 在服务端构建导入树，落到指定父节点下。
+ * opts.parentId：目标目录/页面 id（null 表示顶级）。
+ * opts.overwrite：同名顶层页面是否覆盖（删除原页面子树后重新导入）。
+ * 返回 { count, names }。
+ */
+function importDocsIntoDb(docs, opts) {
+  const o = opts || {};
+  const parentId = o.parentId || null;
+  const overwrite = !!o.overwrite;
   const valid = (docs || []).filter((d) => d && d.id && d.name);
   if (!valid.length) throw new Error('文件中没有可导入的文档');
-  const now = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
-  const rootName = `导入-${stamp}`;
-  const rootId = randomUUID();
-  const iso = now.toISOString();
-  const topFolder = db.docs.find((d) => !d.parent_id && d.kind === 'folder');
-  db.docs.push({
-    id: rootId, parent_id: topFolder ? topFolder.id : null, name: rootName,
-    kind: 'folder', content: '', sort: 0, created_at: iso, updated_at: iso,
-  });
+  if (parentId && !db.docs.some((d) => d.id === parentId)) throw new Error('导入位置不存在');
+
+  const roots = importRootsOf(valid);
+  const names = roots.map((d) => String(d.name).trim()).filter(Boolean);
+  const conflicts = names.length
+    ? db.docs.filter((d) => (d.parent_id || null) === parentId && names.includes(d.name))
+    : [];
+  if (conflicts.length && !overwrite) {
+    const err = new Error('同名页面已存在');
+    err.code = 'IMPORT_CONFLICT';
+    err.conflicts = conflicts.map((d) => d.name);
+    throw err;
+  }
+  if (conflicts.length) {
+    const doomed = new Set();
+    for (const doc of conflicts) for (const id of collectIds(doc.id)) doomed.add(id);
+    db.docs = db.docs.filter((d) => !doomed.has(d.id));
+  }
+
+  const iso = new Date().toISOString();
+  const importedIds = new Set(valid.map((d) => d.id));
   const depthOf = (id) => {
     let depth = 0;
     let cur = id;
     const seen = new Set();
-    while (cur) {
-      const doc = valid.find((x) => x.id === cur);
-      if (!doc || seen.has(cur)) break;
+    while (cur && !seen.has(cur)) {
       seen.add(cur);
+      const doc = valid.find((x) => x.id === cur);
+      if (!doc) break;
       cur = doc.parent_id;
       depth += 1;
     }
     return depth;
   };
   valid.sort((a, b) => depthOf(a.id) - depthOf(b.id));
+
+  const siblings = db.docs.filter((d) => (d.parent_id || null) === parentId);
+  let sort = siblings.length ? Math.max(...siblings.map((d) => d.sort || 0)) + 1 : 1;
   const idMap = {};
   for (const d of valid) {
     const newId = randomUUID();
     idMap[d.id] = newId;
-    const parent = d.parent_id ? (idMap[d.parent_id] || rootId) : rootId;
+    const isRoot = !d.parent_id || !importedIds.has(d.parent_id);
+    const parent = isRoot ? parentId : (idMap[d.parent_id] || parentId);
+    /* 导入到某个节点下时全部作为页面；只有顶级且原为目录时才保留目录 */
+    const kind = (isRoot && !parentId && d.kind === 'folder') ? 'folder' : 'doc';
     db.docs.push({
       id: newId, parent_id: parent, name: String(d.name),
-      kind: d.kind === 'folder' ? 'folder' : 'doc',
+      kind,
       content: typeof d.content === 'string' ? d.content : '',
-      sort: typeof d.sort === 'number' ? d.sort : 0,
+      sort: isRoot ? sort++ : (typeof d.sort === 'number' ? d.sort : 0),
       created_at: d.created_at || iso, updated_at: d.updated_at || iso,
     });
   }
-  return valid.length;
+  return { count: valid.length, names };
 }
 
 /* ---------------- 启动前初始化 ---------------- */
@@ -978,7 +1035,11 @@ async function handleExtra(req, res, pathname) {
   }
 
   // 导入：上传加密导出文件，服务端用当前登录密码解密后建目录树
+  // ?parent_id=xxx 指定落点（目录或页面），?mode=overwrite 表示同名覆盖
   if (pathname === '/api/import' && req.method === 'POST') {
+    const iu = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const parentId = iu.searchParams.get('parent_id') || null;
+    const overwrite = iu.searchParams.get('mode') === 'overwrite';
     let text;
     try { text = await readBodyText(req); } catch { return sendJson(res, 400, { error: '读取文件失败' }); }
     if (!currentPassword) return sendJson(res, 401, { error: '未登录' });
@@ -996,6 +1057,11 @@ async function handleExtra(req, res, pathname) {
     if (!parsed || !Array.isArray(parsed.docs)) {
       return sendJson(res, 400, { error: '无法解密：该文件可能由不同密码加密，或文件已损坏' });
     }
+    /* 先预检同名冲突，避免用户取消覆盖时白写图片资产 */
+    const conflicts = importConflicts(parsed.docs, parentId);
+    if (conflicts.length && !overwrite) {
+      return sendJson(res, 409, { error: '同名页面已存在', conflicts });
+    }
     /* 先落盘导入文件里的图片资产（同 id 已存在时跳过），再建文档树。 */
     if (Array.isArray(parsed.assets) && currentKey) {
       for (const a of parsed.assets) {
@@ -1005,15 +1071,16 @@ async function handleExtra(req, res, pathname) {
         if (bytes.length) await writeAsset(a.id, bytes, a.mime, currentKey);
       }
     }
-    let count = 0;
+    let result;
     try {
-      count = importDocsIntoDb(parsed.docs);
+      result = importDocsIntoDb(parsed.docs, { parentId, overwrite });
     } catch (e) {
+      if (e.code === 'IMPORT_CONFLICT') return sendJson(res, 409, { error: e.message, conflicts: e.conflicts });
       return sendJson(res, 400, { error: e.message });
     }
     await persist();
-    await audit('import', { count }, req);
-    return sendJson(res, 200, { ok: true, count });
+    await audit('import', { count: result.count, parent: parentId, overwrite }, req);
+    return sendJson(res, 200, { ok: true, count: result.count, names: result.names });
   }
 
   if (pathname === '/api/backup' && req.method === 'POST') {

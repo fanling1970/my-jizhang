@@ -43,6 +43,8 @@
     pwMsg: $('#pw-msg'),
     backupList: $('#backup-list'),
     auditLog: $('#audit-log'),
+    toast: $('#toast'),
+    sidebarResizer: $('#sidebar-resizer'),
   };
 
   const ICON = {
@@ -61,6 +63,7 @@
     tabs: 'my-jizhang.tabs',
     active: 'my-jizhang.active',
     sidebarCollapsed: 'my-jizhang.sidebarCollapsed',
+    sidebarWidth: 'my-jizhang.sidebarWidth',
   };
 
   const state = {
@@ -78,6 +81,7 @@
   let ctxTargetId = null;
   let imgCtxTarget = null;
   let ctxMenuOpen = null; // 'ctx' | 'sidebar' | null
+  let importParentId = null; // 本次导入的落点节点 id（null = 顶级）
 
   /* ---------------- 基础工具 ---------------- */
 
@@ -105,9 +109,24 @@
     if (!res.ok) {
       const err = new Error((data && data.error) || `HTTP ${res.status}`);
       err.status = res.status;
+      err.data = data;
       throw err;
     }
     return data;
+  }
+
+  let toastTimer = null;
+  /** 轻量提示条：导入成功/失败等需要明确反馈的操作 */
+  function showToast(message) {
+    if (!el.toast || !message) return;
+    el.toast.textContent = message;
+    el.toast.hidden = false;
+    requestAnimationFrame(() => el.toast.classList.add('show'));
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      el.toast.classList.remove('show');
+      setTimeout(() => { el.toast.hidden = true; }, 220);
+    }, 2600);
   }
 
   const findMeta = (id) => state.docs.find((d) => d.id === id);
@@ -133,6 +152,8 @@
       if (active && state.docs.some((d) => d.id === active)) state.activeId = active;
       const collapsed = localStorage.getItem(LS.sidebarCollapsed) === '1';
       if (collapsed) collapseSidebar(true);
+      const savedW = Number(localStorage.getItem(LS.sidebarWidth));
+      if (Number.isFinite(savedW) && savedW > 0) applySidebarWidth(savedW);
     } catch (e) { /* ignore */ }
   }
 
@@ -147,6 +168,48 @@
     el.sidebar.classList.remove('collapsed');
     el.sidebarCollapsed.hidden = true;
     if (!silent) persistUi();
+  }
+
+  /* ---------------- 侧边栏宽度拖动 ---------------- */
+
+  function applySidebarWidth(px) {
+    const max = Math.max(240, Math.min(520, window.innerWidth - 320));
+    const w = Math.max(160, Math.min(max, Math.round(px)));
+    el.sidebar.style.setProperty('--sidebar-w', w + 'px');
+    return w;
+  }
+
+  function bindSidebarResize() {
+    const handle = el.sidebarResizer;
+    if (!handle) return;
+    let start = null;
+    let lastWidth = 232;
+    const onMove = (e) => {
+      if (!start) return;
+      lastWidth = applySidebarWidth(start.width + e.clientX - start.x);
+    };
+    const onUp = () => {
+      if (!start) return;
+      start = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try { localStorage.setItem(LS.sidebarWidth, String(lastWidth)); } catch { /* ignore */ }
+    };
+    handle.addEventListener('mousedown', (e) => {
+      if (isMobileUi()) return;
+      e.preventDefault();
+      start = { x: e.clientX, width: el.sidebar.getBoundingClientRect().width };
+      lastWidth = start.width;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+    handle.addEventListener('dblclick', () => {
+      if (isMobileUi()) return;
+      applySidebarWidth(232);
+      try { localStorage.setItem(LS.sidebarWidth, '232'); } catch { /* ignore */ }
+    });
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }
 
   /* ---------------- 手机端侧边栏抽屉（默认收起，右滑打开） ---------------- */
@@ -271,8 +334,8 @@
   }
 
   async function createDoc(parentId, kind) {
-    const prompt = kind === 'folder' ? '目录名称' : '文档名称（通常写月份，如 2026年12月）';
-    const defaultName = kind === 'folder' ? '新目录' : '新文档';
+    const prompt = kind === 'folder' ? '笔记本名称' : '页面名称（通常写月份，如 2026年12月）';
+    const defaultName = kind === 'folder' ? '新笔记本' : '新页面';
     const typed = window.prompt(prompt, defaultName);
     if (typed === null) return;
     const name = typed.trim();
@@ -370,7 +433,7 @@
       `<span class="node-icon ${isFolder ? 'folder' : 'doc'}">${isFolder ? ICON.folder : ICON.doc}</span>` +
       `<span class="node-name" title="${escapeAttr(doc.name)}">${escapeHtml(doc.name)}</span>` +
       `<span class="node-actions">` +
-      `<button class="node-add" data-act="add" title="${isFolder ? '新建子文档' : '新建子页面'}">＋</button>` +
+      `<button class="node-add" data-act="add" title="新建子页面">＋</button>` +
       `<button class="node-more" data-act="more" title="更多菜单">${ICON.more}</button>` +
       `</span>` +
       '</div>';
@@ -385,7 +448,12 @@
   }
 
   function collapseAll() { state.expanded.clear(); renderTree(); persistUi(); }
-  function expandAll() { state.docs.forEach((d) => { if (d.kind === 'folder') state.expanded.add(d.id); }); renderTree(); persistUi(); }
+  function expandAll() {
+    /* 目录与页面都可能有子页面，统一按「有子级即展开」处理 */
+    const parents = new Set(state.docs.map((d) => d.parent_id).filter(Boolean));
+    parents.forEach((id) => state.expanded.add(id));
+    renderTree(); persistUi();
+  }
 
   function locateActiveDoc() {
     if (!state.activeId) return;
@@ -431,12 +499,12 @@
       <button data-act="sort">排序 <span class="sub-arrow">›</span></button>
       <button data-act="search" disabled>搜索 <span class="shortcut">Ctrl+F</span></button>
       <div class="ctx-divider"></div>
-      <button data-act="child-doc">在下方新建文档</button>
-      <button data-act="child-folder">在下方新建目录</button>
-      <button data-act="child-doc-above">在上方新建文档</button>
+      <button data-act="child-doc">在下方新建页面</button>
+      <button data-act="child-doc-above">在上方新建页面</button>
       <div class="ctx-divider"></div>
       <button data-act="move">移动 <span class="sub-arrow">›</span></button>
       <button data-act="export">导出（含子级）</button>
+      <button data-act="import">导入页面…</button>
       <div class="ctx-divider"></div>
       <button data-act="delete" class="danger">删除</button>
     `;
@@ -452,14 +520,15 @@
       <button data-act="rename">重命名 <span class="shortcut">F2</span></button>
       <button data-act="pin">置顶</button>
       <div class="ctx-divider"></div>
-      <button data-act="above">在上方新建文档</button>
-      <button data-act="below">在下方新建文档</button>
+      <button data-act="above">在上方新建页面</button>
+      <button data-act="below">在下方新建页面</button>
       <button data-act="inner-doc">在内部新建子页面</button>
       <button data-act="duplicate">复制</button>
       <div class="ctx-divider"></div>
       <button data-act="open-right">在页签右侧打开 <span class="shortcut">Alt+点击</span></button>
       <button data-act="move">移动 <span class="sub-arrow">›</span></button>
       <button data-act="export">导出</button>
+      <button data-act="import">导入页面…</button>
       <div class="ctx-divider"></div>
       <button data-act="delete" class="danger">删除</button>
     `;
@@ -499,7 +568,7 @@
         );
       })
       .join('');
-    el.tabStrip.innerHTML = tabs + '<button class="tab-new" id="tab-new" title="新建文档">＋</button>';
+    el.tabStrip.innerHTML = tabs + '<button class="tab-new" id="tab-new" title="新建页面">＋</button>';
   }
 
   async function closeTab(id) {
@@ -1774,22 +1843,60 @@
     location.href = '/api/export' + (id ? '?id=' + encodeURIComponent(id) : '');
   }
 
-  async function doImport(file) {
+  /** 打开文件选择框，导入页面到指定节点下（directory 或页面都可） */
+  function startImport(parentId) {
+    importParentId = parentId || null;
+    el.importInput.click();
+  }
+
+  function importUrl(parentId, overwrite) {
+    const base = parentId ? `/api/import?parent_id=${encodeURIComponent(parentId)}` : '/api/import';
+    return overwrite ? `${base}${base.includes('?') ? '&' : '?'}mode=overwrite` : base;
+  }
+
+  async function afterImport(r, parentId) {
+    await loadDocs();
+    if (parentId) state.expanded.add(parentId);
+    renderTree(); renderTabs(); persistUi();
+    setStatus('');
+    /* 只导入了一个页面时直接打开它，省去再找一次 */
+    const names = (r && r.names) || [];
+    if (names.length === 1) {
+      const target = state.docs.find((d) => (d.parent_id || null) === (parentId || null) && d.name === names[0]);
+      if (target && target.kind === 'doc') await openDoc(target.id);
+    }
+    showToast(`导入成功：${(r && r.count) || 0} 个页面`);
+  }
+
+  async function doImport(file, parentId) {
     setStatus('导入中…');
     let text;
-    try { text = await file.text(); } catch { setStatus('读取文件失败'); return; }
+    try { text = await file.text(); } catch { setStatus(''); showToast('读取文件失败'); return; }
+    const send = (overwrite) => api(importUrl(parentId, overwrite), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: text,
+    });
     // 加密文件交给服务端用当前登录密码解密；客户端没有密钥，无法本地解密
     try {
-      const r = await api('/api/import', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: text,
-      });
-      await loadDocs();
-      renderTree();
-      setStatus(`导入完成：共 ${r.count || 0} 项`);
+      const r = await send(false);
+      await afterImport(r, parentId);
     } catch (e) {
-      setStatus('导入失败：' + (e.message || '密码不匹配或文件已损坏'));
+      if (e.status === 409) {
+        const names = ((e.data && e.data.conflicts) || []).join('、');
+        const ok = window.confirm(`导入位置已存在同名页面：\n${names}\n\n覆盖后原页面会被删除并替换，是否继续？`);
+        if (!ok) { setStatus(''); showToast('已取消导入'); return; }
+        try {
+          const r2 = await send(true);
+          await afterImport(r2, parentId);
+        } catch (e2) {
+          setStatus('');
+          showToast('导入失败：' + (e2.message || '文件已损坏'));
+        }
+      } else {
+        setStatus('');
+        showToast('导入失败：' + (e.message || '密码不匹配或文件已损坏'));
+      }
     }
   }
 
@@ -1911,6 +2018,7 @@
     el.sidebarCollapsed.addEventListener('click', expandSidebar);
     if (el.sidebarMask) el.sidebarMask.addEventListener('click', closeMobileSidebar);
     bindMobileSidebarSwipe();
+    bindSidebarResize();
 
     /* 目录树 */
     el.tree.addEventListener('click', (event) => {
@@ -1963,7 +2071,10 @@
           await createDoc(root ? root.id : null, 'folder');
         } else if (act === 'foldall') collapseAll();
         else if (act === 'unfoldall') expandAll();
-        else if (act === 'import') { el.importInput.click(); }
+        else if (act === 'import') {
+          const root = state.docs.find((d) => !d.parent_id && d.kind === 'folder');
+          startImport(root ? root.id : null);
+        }
         else if (act === 'export-all') { exportNode(null); }
         else if (act === 'sort') { window.prompt('排序子菜单暂未实现，后续补充', document.body.innerText); renderTree(); }
         return;
@@ -1980,8 +2091,6 @@
         await createDoc(doc.id, 'doc');
       } else if (act === 'inner-doc') {
         await createDoc(doc.id, 'doc');
-      } else if (act === 'child-folder') {
-        await createDoc(doc.id, 'folder');
       } else if (act === 'child-doc-above' || act === 'above' || act === 'below') {
         await createDoc(doc.parent_id, 'doc');
       } else if (act === 'duplicate') {
@@ -1992,18 +2101,29 @@
         if (!state.tabs.includes(doc.id)) state.tabs.push(doc.id);
         await openDoc(doc.id);
       } else if (act === 'move') {
-        const options = ['（顶级笔记本）', ...state.docs.filter((d) => d.kind === 'folder' && d.id !== doc.id).map((d) => d.name)];
-        const names = options.join('\n');
-        const idx = window.prompt('移动到哪个目录？（输入序号，1 = 顶级笔记本）\n' + names, '1');
+        /* 目录与页面都可以作为父级；排除自己及后代，避免形成环 */
+        const blocked = new Set([doc.id]);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const d of state.docs) {
+            if (d.parent_id && blocked.has(d.parent_id) && !blocked.has(d.id)) { blocked.add(d.id); grew = true; }
+          }
+        }
+        const targets = state.docs.filter((d) => !blocked.has(d.id));
+        const options = ['（顶级笔记本）', ...targets.map((d) => d.name)];
+        const idx = window.prompt('移动到哪个页面下？（输入序号，1 = 顶级笔记本）\n' + options.join('\n'), '1');
         if (idx !== null) {
           const n = parseInt(idx, 10) - 1;
-          if (n >= 0 && n < options.length) {
-            const target = n === 0 ? null : state.docs.filter((d) => d.kind === 'folder')[n - 1]?.id || null;
+          if (n >= 0 && n <= targets.length) {
+            const target = n === 0 ? null : targets[n - 1].id;
             await moveDoc(doc, target);
           }
         }
       } else if (act === 'export') {
         exportNode(doc.id);
+      } else if (act === 'import') {
+        startImport(doc.id);
       }
     });
 
@@ -2267,11 +2387,15 @@
       catch (e) { setStatus('备份失败：' + e.message); }
     });
     $('#btn-export-all').addEventListener('click', () => exportNode(null));
-    $('#btn-import-file').addEventListener('click', () => el.importInput.click());
+    $('#btn-import-file').addEventListener('click', () => {
+      /* 设置里的导入：有打开页面就导入到该页面下，否则导入到顶级笔记本 */
+      const root = state.docs.find((d) => !d.parent_id && d.kind === 'folder');
+      startImport(state.activeId || (root ? root.id : null));
+    });
     $('#btn-migrate-assets').addEventListener('click', migrateImagesToAssets);
     el.importInput.addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
-      if (f) doImport(f);
+      if (f) doImport(f, importParentId);
       e.target.value = '';
     });
     el.backupList.addEventListener('click', async (e) => {
