@@ -460,7 +460,7 @@ button { cursor: pointer; }
 
 .img-inline {
   position: relative; display: inline-block;
-  max-width: 100%; line-height: 0; vertical-align: bottom;
+  max-width: 100%; line-height: 0; vertical-align: top;
 }
 
 .img-inline .doc-img {
